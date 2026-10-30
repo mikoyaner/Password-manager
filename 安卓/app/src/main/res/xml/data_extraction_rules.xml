@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 禁止系统/云备份与设备迁移导出密文库、配置与记住的账号密码 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="vaults" />
+        <exclude domain="sharedpref" path="pwdmgr_config.xml" />
+        <exclude domain="sharedpref" path="pwdmgr_secrets.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="vaults" />
+        <exclude domain="sharedpref" path="pwdmgr_config.xml" />
+        <exclude domain="sharedpref" path="pwdmgr_secrets.xml" />
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="用户名（服务器账号）" />
+    <EditText android:id="@+id/account" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="text"
+        android:hint="登录名" />
+
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="用户密码" android:layout_marginTop="8dp" />
+    <EditText android:id="@+id/service_pwd" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="textPassword" />
+
+    <CheckBox android:id="@+id/remember" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:text="记住用户密码"
+        android:checked="true" android:layout_marginTop="8dp" />
+
+</LinearLayout>

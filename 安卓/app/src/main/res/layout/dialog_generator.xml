@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="长度" />
+        <EditText android:id="@+id/gen_len" android:layout_width="70dp"
+            android:layout_height="wrap_content" android:inputType="number"
+            android:layout_marginStart="8dp" />
+        <CheckBox android:id="@+id/gen_symbols" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="含符号" android:checked="true"
+            android:layout_marginStart="12dp" />
+        <Button android:id="@+id/gen_regen" android:layout_width="wrap_content"
+            android:layout_height="wrap_content" android:text="重新生成" />
+    </LinearLayout>
+
+    <EditText android:id="@+id/gen_out" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:inputType="text"
+        android:textIsSelectable="true" android:layout_marginTop="8dp" />
+
+</LinearLayout>

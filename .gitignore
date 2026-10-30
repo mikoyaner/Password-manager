@@ -1,0 +1,56 @@
+# Android
+安卓/app/build/
+安卓/build/
+.gradle/
+*.iml
+local.properties
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# 其他
+*.log
+
+# 本机部署凭据（真实值只写在 .env，模板见 .env.example）
+server/.env
+server/deploy_key
+server/deploy_key.pub
+
+# 证书与私钥（服务器自签证书不要进仓库）
+server/certs/
+*.pem
+*.crt
+*.key
+
+# 部署临时文件
+server/.venv/
+server/main.py.pre_apk
+
+# 运行产物 / 测试库
+window/dist/
+window/build/
+*.db
+*.db-shm
+*.db-wal
+安卓/javatest/build/
+
+# Android 签名/安装包
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# 本机工作记录 / 评审日志
+worklog.md
+
+# IDE
+.idea/
+.vscode/
+
+# 本机环境变量文件
+.secrets.env
+
+# ZCode 会话内部文件
+.zcode/

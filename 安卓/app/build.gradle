@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.pwdmgr'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.pwdmgr"
+        minSdk 26          // java.util.Base64 / java.nio.file 需要 API 26+
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        // Bouncy Castle 带签名文件，打包时排除避免冲突
+        resources {
+            excludes += ['META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/DEPENDENCIES']
+        }
+    }
+}
+
+dependencies {
+    // 对齐 Kotlin stdlib 版本：appcompat 1.7.0 传递引入 kotlin-stdlib 1.8.22，
+    // 而部分 androidx 依赖仍带旧的 kotlin-stdlib-jdk7/jdk8 1.6.21，二者类重复
+    // (Duplicate class kotlin.io.path.*)。用 kotlin-bom 统一到 1.8.22；1.8 起
+    // jdk7/jdk8 已并入主 stdlib，成为无重复类的空壳。
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // 服务密码加密存储（AndroidKeyStore 主密钥），替代桌面端系统凭据库
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    // Argon2id 实现（标准 JCE 无 Argon2）
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+}

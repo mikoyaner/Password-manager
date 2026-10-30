@@ -1,0 +1,42 @@
+[Unit]
+Description=PwdMgr Sync Server (FastAPI/uvicorn, sandboxed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pwmanager
+Group=pwmanager
+WorkingDirectory=/opt/pwmanager/server
+Environment=PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
+Environment=PYTHONDONTWRITEBYTECODE=1
+# 直连 uvicorn（自签 TLS），刻意不设置 PWMGR_TRUST_PROXY：不信任 X-Forwarded-For
+ExecStart=/opt/pwmanager/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8443 --workers 1 --ssl-keyfile certs/server.key --ssl-certfile certs/server.crt
+Restart=always
+RestartSec=3
+
+# ---- 沙箱：全文件系统只读，唯一可写点 = 数据目录 ----
+# 效果：即使服务被攻破，进程也只能对 /opt/pwmanager/server/data 读写，
+# 写不了代码目录、系统配置与其他任何位置（内核级保证）。
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/pwmanager/server/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

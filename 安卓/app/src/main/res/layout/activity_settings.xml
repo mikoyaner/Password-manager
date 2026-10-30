@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="服务器地址" />
+        <EditText android:id="@+id/server_url" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="textUri"
+            android:hint="https://你的公网IP:8443" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="证书指纹 (自签 HTTPS 才需要)" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/cert_fp" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="text"
+            android:hint="SHA-256 指纹，见部署文档" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="剪贴板自动清空秒数" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/clip_secs" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="number" android:hint="30" />
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:layout_marginTop="16dp">
+            <Button android:id="@+id/save" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="保存" />
+            <Button android:id="@+id/test_conn" android:layout_width="0dp" android:layout_weight="1"
+                android:layout_height="wrap_content" android:text="测试连接" />
+        </LinearLayout>
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="本机库操作（仅影响当前已解锁的库，服务器无感）"
+            android:textStyle="bold" android:layout_marginTop="24dp" />
+
+        <Button android:id="@+id/change_vault_pwd" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="修改密码库密码" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="自动填充（系统级集成，仅本机库解锁时可用）"
+            android:textStyle="bold" android:layout_marginTop="24dp" />
+
+        <Button android:id="@+id/enable_autofill" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="设为系统自动填充服务" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="账号操作（需用户名与用户密码，走服务器）"
+            android:textStyle="bold" android:layout_marginTop="24dp" />
+
+        <Button android:id="@+id/change_pwd" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="修改用户密码" />
+
+        <Button android:id="@+id/delete_account" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="注销服务器账号" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="注册仅创建服务器账号（用户名 + 用户密码），云端初始为零份密码库。密码库密码仍只留在本机。"
+            android:layout_marginBottom="12dp" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="用户名" />
+        <EditText android:id="@+id/account" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="text"
+            android:hint="字母数字，可含 . _ -（3-20 位）" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="用户密码" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/service_pwd" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="textPassword" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="确认用户密码" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/service_pwd2" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="textPassword" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="手机（可选）" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/phone" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="phone" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="邮箱（可选）" android:layout_marginTop="8dp" />
+        <EditText android:id="@+id/email" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:inputType="textEmailAddress" />
+
+    </LinearLayout>
+</ScrollView>
