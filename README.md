@@ -223,3 +223,4 @@ python E:\密码管理器\window\app.py
 - 同步日志、CSV 导出禁止记录任何明文密码/主密码/密文内容；CSV 为明文，导出前二次确认。
 - 服务器只存密文 blob + 用户密码 verifier hash。
 - 每次重装自签证书，指纹要同步到两端。
+# Password-manager
