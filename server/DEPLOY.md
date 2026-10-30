@@ -172,6 +172,49 @@ sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh delete_user <username>
 sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh reset_password <username> <new>
 ```
 
+## 7.5 忘记密码：管理员侧配置（v2.7）
+
+用户在客户端点「忘记密码」→ 输入用户名 → 按提示用**注册时的邮箱**发邮件
+「01用户名」到管理员邮箱，或用**注册时的手机号**发短信「01用户名d」。
+服务器验证**发件人联系方式哈希**（注册时明文即哈希存储，永不落明文）后，
+自动把该用户密码重置为 **86868686**。归一化/哈希实现见 `server/contacts.py`。
+
+**配置步骤**（`/opt/pwmanager/server/admin.env`，root:pwmanager 0640，setup 脚本已生成模板）：
+
+```dotenv
+PWMGR_ADMIN_EMAIL=yourmailbox@qq.com     # 接收找回邮件 + 自动回复的发件人
+PWMGR_IMAP_HOST=imap.qq.com              # QQ 邮箱 IMAP
+PWMGR_IMAP_USER=yourmailbox@qq.com
+PWMGR_IMAP_PASS=<IMAP/SMTP 授权码，不是登录密码>
+PWMGR_SMTP_HOST=smtp.qq.com
+PWMGR_SMTP_PORT=465
+PWMGR_SMTP_USER=yourmailbox@qq.com
+PWMGR_SMTP_PASS=<同一授权码>
+PWMGR_SMS_HOOK_TOKEN=<setup 已自动生成>  # 短信上行回调的鉴权 token
+PWMGR_ADMIN_SMS_HINT=编辑短信「01用户名d」发送到 1069xxxxxxxx
+```
+
+1. 注册一个专用邮箱（推荐 QQ 邮箱）→ 网页设置 → 账户 → 开启 IMAP/SMTP 服务 → 生成**授权码**
+2. 填入 admin.env → `sudo systemctl restart pwmanager && sudo systemctl restart pwmanager-mail.timer`
+3. 验证收信链路：用任意邮箱发一封正文为 `01<某测试用户名>` 的邮件 → 约 1 分钟内收到自动回复
+4. 客户端「忘记密码」弹窗的内容来自 `GET /contact`（即 admin_email 与 ADMIN_SMS_HINT）
+
+**手动兜底**（邮件/短信自动化都不可用时）：
+
+```bash
+sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh forgot_reset <用户名> <发件人邮箱或手机号>
+```
+
+**短信自动化（二期，待实测）**：在云短信服务商开通**上行短信**并配置回调 URL：
+`https://<服务器地址>:8443/internal/sms-up?token=<PWMGR_SMS_HOOK_TOKEN>`。
+⚠️ 先实测「用户直接发短信到 SP 端口」能否触发回调——若厂商要求"回复平台下发的短信"，
+则下发需要明文手机号，与哈希存储冲突，短信侧请保持手动兜底。重置后不回短信，
+用户重试登录 86868686 即确认生效（24 小时内每账号仅重置一次）。
+
+**安全边界**：重置 = 证明"发件人是注册邮箱/手机的主人"后的账号接管（本意如此）；
+本地密码库不受影响（云端库为密文，需密码库密码才能解密）。86868686 为过渡密码，
+客户端登录时会弹窗提醒立即修改。
+
 ## 8. 证书指纹
 
 ```bash

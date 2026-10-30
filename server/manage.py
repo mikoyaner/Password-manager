@@ -1,14 +1,16 @@
-"""服务器管理脚本（v2.1）。
+"""服务器管理脚本（v2.7）。
 
 用法：
   python manage.py list_users
   python manage.py delete_user <username>
   python manage.py reset_password <username> <new_service_pwd>
+  python manage.py forgot_reset <username> <发件人邮箱或手机号>
   python manage.py health
 """
 import sys
 
 import auth
+import forgot
 import store
 
 
@@ -57,6 +59,23 @@ def _reset_password(username: str, new_pwd: str):
     print(f"reset ok for: {username}")
 
 
+def _forgot_reset(username: str, contact: str):
+    """忘记密码手动兜底：contact 为用户发来的邮件里的发件人邮箱/短信发件人手机号。"""
+    store.init_db()
+    kind = "email" if "@" in contact else "sms"
+    result = forgot.attempt_reset(username, kind, contact)
+    if result == "ok":
+        print(f"已重置：{username} 的用户密码现为初始密码 86868686，请提醒用户立即修改")
+    elif result == "no_user":
+        print(f"未找到用户 {username}", file=sys.stderr); sys.exit(1)
+    elif result == "mismatch":
+        print("发件人联系方式与注册信息不匹配，未重置", file=sys.stderr); sys.exit(1)
+    elif result == "throttled":
+        print("该账号 24 小时内已重置过（无需重复操作）")
+    else:
+        print(f"失败: {result}", file=sys.stderr); sys.exit(1)
+
+
 def _health():
     store.init_db()
     print(f"ok, users={store.user_count()}")
@@ -73,6 +92,8 @@ def main():
         _delete_user(sys.argv[2])
     elif cmd == "reset_password" and len(sys.argv) >= 4:
         _reset_password(sys.argv[2], sys.argv[3])
+    elif cmd == "forgot_reset" and len(sys.argv) >= 4:
+        _forgot_reset(sys.argv[2], sys.argv[3])
     elif cmd == "health":
         _health()
     else:

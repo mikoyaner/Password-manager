@@ -493,6 +493,59 @@ class LoginStep2Dialog(QDialog):
 
 # ============ 同步 ============
 
+class ForgotPwdDialog(QDialog):
+    """忘记密码：输入用户名 → 从服务器取管理员联系方式 → 显示自助重置说明。
+
+    用户用**注册时的邮箱/手机号**发出「01用户名」邮件 / 「01用户名d」短信，
+    服务器验证发件人哈希后自动把用户密码重置为 86868686。
+    """
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.setWindowTitle("忘记密码")
+        self.setMinimumWidth(500)
+        lay = QVBoxLayout(self)
+        f = QFormLayout()
+        self.user = QLineEdit()
+        f.addRow("用户名", self.user)
+        lay.addLayout(f)
+        btns = QHBoxLayout()
+        fetch = QPushButton("获取发送说明")
+        fetch.clicked.connect(self._fetch)
+        close = QPushButton("关闭")
+        close.clicked.connect(self.reject)
+        btns.addWidget(fetch); btns.addStretch(1); btns.addWidget(close)
+        lay.addLayout(btns)
+        self.info = QLabel("输入你的用户名，点『获取发送说明』。")
+        self.info.setWordWrap(True)
+        lay.addWidget(self.info)
+
+    def _fetch(self):
+        u = self.user.text().strip()
+        if not u:
+            self.info.setText("请先输入用户名。")
+            return
+        self.info.setText("正在获取服务器联系方式…")
+        try:
+            # /contact 无需认证，凭据占位即可
+            ct = wait_for(self, lambda: make_client(self.cfg, u, "x").contact(),
+                          "正在获取…")
+        except sync.SyncError as e:
+            self.info.setText(f"获取失败：{e}")
+            return
+        admin_email = (ct or {}).get("admin_email", "")
+        sms_hint = (ct or {}).get("sms_hint", "")
+        email_line = f"到 **{admin_email}**" if admin_email else "——服务器未配置找回邮箱——"
+        sms_line = f"到：**{sms_hint}**" if sms_hint else "——服务器未配置短信入口——"
+        self.info.setText(
+            f"用户名：{u}\n\n"
+            f"1. 用**注册时的邮箱**发送内容「01{u}」{email_line}\n"
+            f"2. 或用**注册时的手机号**发送短信「01{u}d」{sms_line}\n\n"
+            "管理员核实后将自动把你的用户密码重置为 **86868686**（约 1 分钟内生效）。\n"
+            "用 86868686 登录后，请立即在菜单『账户/同步 → 修改用户密码』修改。")
+
+
 class SyncDialog(QDialog):
     """同步弹窗：对『当前本地库』执行推送/拉取/注册。
 
@@ -538,10 +591,12 @@ class SyncDialog(QDialog):
         btns = QHBoxLayout()
         self.login_btn = QPushButton("登录")
         self.register_btn = QPushButton("注册")
+        self.forgot_btn = QPushButton("忘记密码")
         self.login_btn.clicked.connect(self._on_login)
         self.register_btn.clicked.connect(self._on_to_register)
+        self.forgot_btn.clicked.connect(self._on_forgot)
         btns.addWidget(self.login_btn); btns.addWidget(self.register_btn)
-        btns.addStretch(1)
+        btns.addWidget(self.forgot_btn); btns.addStretch(1)
         lay.addLayout(btns)
 
         self.auth_status = QLabel("")
@@ -614,6 +669,9 @@ class SyncDialog(QDialog):
         return sync.SyncClient(self.cfg["server_url"], u, p,
                                self.cfg.get("cert_fingerprint") or None)
 
+    def _on_forgot(self):
+        ForgotPwdDialog(self.cfg, self).exec()
+
     def _on_login(self):
         u = self.username.text().strip()
         p = self.service_pwd.text()
@@ -633,6 +691,11 @@ class SyncDialog(QDialog):
         finally:
             self.login_btn.setEnabled(True)
             self.register_btn.setEnabled(True)
+        if p == "86868686":
+            QMessageBox.warning(
+                self, "初始密码",
+                "当前使用的是找回重置后的初始密码，请立即在菜单\n"
+                "『账户/同步 → 修改用户密码』中设置新密码。")
         if vaults:
             latest = vaults[0]
             self.action_info.setText(

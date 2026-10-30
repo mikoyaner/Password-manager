@@ -182,6 +182,13 @@ public class SyncClient {
         try { return r.json(); } catch (Exception e) { throw new SyncException("health 响应解析失败"); }
     }
 
+    /** GET /contact：找回密码联系方式（无认证）。返回 {admin_email, sms_hint}。 */
+    public JSONObject contact() throws SyncException {
+        Resp r = request("/contact", "GET", null, false);
+        if (r.status != 200) throw new SyncException("GET /contact 失败 (" + r.status + ")");
+        try { return r.json(); } catch (Exception e) { throw new SyncException("contact 解析失败: " + e.getMessage()); }
+    }
+
     /**
      * POST /register：注册账号。ciphertext 为 null 时仅建账号（云端零份库）；
      * 非 null 时同时上传首版（pwdTime 必填）。返回 {created_at, first_vid}。

@@ -135,6 +135,13 @@ class SyncClient:
             raise SyncError(f"health 失败: {status} {body}")
         return body
 
+    def contact(self) -> dict:
+        """GET /contact：找回密码联系方式（无认证）。返回 {admin_email, sms_hint}。"""
+        status, body = _request(self._url("/contact"), cert_fingerprint=self.fp)
+        if status != 200:
+            raise SyncError(f"GET /contact 失败 ({status}): {_extract_err(body)}")
+        return body
+
     def register(self, *, service_pwd: str, email: str, phone: str,
                  pwd_time: int | None = None, label: str | None = None,
                  ciphertext_b64: str | None = None) -> dict:

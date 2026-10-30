@@ -232,6 +232,7 @@ public class MainActivity extends AppCompatActivity {
                 .setNeutralButton("注册账号", (dd, w) -> showRegister())
                 .setPositiveButton("登录", null)
                 .setNegativeButton("取消", null).create();
+        dlg.findViewById(R.id.forgot).setOnClickListener(v -> ForgotPwd.show(this, storage));
         Ui.keepOpen(d, () -> {
             String u = acct.getText().toString().trim();
             String p = spwd.getText().toString();
@@ -256,6 +257,7 @@ public class MainActivity extends AppCompatActivity {
                 storage.setLastAccount(account);
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
+                    ForgotPwd.warnIfInitialPwd(this, servicePwd);
                     int k = vaults == null ? 0 : vaults.length();
                     status.setText("已登录 @" + account + " · 云端 " + k + " 份");
                     chooseAction(account, servicePwd, vaults, k);

@@ -172,6 +172,7 @@ public class HomeActivity extends AppCompatActivity {
                 .setNeutralButton("注册账号", (dd, w) -> showRegister())
                 .setPositiveButton("登录", null)
                 .setNegativeButton("取消", null).create();
+        dlg.findViewById(R.id.forgot).setOnClickListener(v -> ForgotPwd.show(this, storage));
         Ui.keepOpen(d, () -> {
             String u = acct.getText().toString().trim();
             String p = spwd.getText().toString();
@@ -199,6 +200,7 @@ public class HomeActivity extends AppCompatActivity {
                 else SecretStore.deleteServicePwd(this, account);
                 storage.setLastAccount(account);
                 runOnUiThread(() -> {
+                    ForgotPwd.warnIfInitialPwd(this, servicePwd);
                     int k = vaults == null ? 0 : vaults.length();
                     if (k == 0) {
                         new AlertDialog.Builder(this).setTitle("登录成功")

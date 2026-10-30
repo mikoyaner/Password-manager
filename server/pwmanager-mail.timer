@@ -1,0 +1,10 @@
+[Unit]
+Description=Run pwdmgr mail worker every minute
+
+[Timer]
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=pwmanager-mail.service
+
+[Install]
+WantedBy=timers.target

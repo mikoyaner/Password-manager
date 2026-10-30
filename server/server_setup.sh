@@ -73,11 +73,37 @@ visudo -c -f "$SUDOERS" >/dev/null || { rm -f "$SUDOERS"; die "sudoers 语法校
 usermod -aG systemd-journal pwdeploy 2>/dev/null || true
 
 # ---- 4) 代码文件权限 + 安装 systemd 单元 ----
-for f in main.py store.py auth.py manage.py requirements.txt pwmanager.service server_setup.sh; do
+for f in main.py store.py auth.py manage.py mail_worker.py requirements.txt \
+         pwmanager.service pwmanager-mail.service pwmanager-mail.timer server_setup.sh; do
   [ -f "$SERVER_DIR/$f" ] && chown pwdeploy:pwmanager "$SERVER_DIR/$f" && chmod 640 "$SERVER_DIR/$f"
 done
 [ -f "$UNIT_SRC" ] || die "缺少 $UNIT_SRC（先运行 deploy_via_python.py 上传）"
 install -m 644 "$UNIT_SRC" "$UNIT_DST"
+for u in pwmanager-mail.service pwmanager-mail.timer; do
+  [ -f "$SERVER_DIR/$u" ] && install -m 644 "$SERVER_DIR/$u" "/etc/systemd/system/$u"
+done
+
+# 管理员配置（找回密码）：已存在则不覆盖；token 首次自动生成
+ADMIN_ENV="$SERVER_DIR/admin.env"
+if [ ! -f "$ADMIN_ENV" ]; then
+  log "生成 admin.env 模板（请填入 IMAP/SMTP 授权码与管理员邮箱）..."
+  cat > "$ADMIN_ENV" <<EOF
+# 找回密码（管理员侧）配置。修改后: systemctl restart pwmanager && systemctl restart pwmanager-mail.timer
+PWMGR_ADMIN_EMAIL=
+PWMGR_IMAP_HOST=imap.qq.com
+PWMGR_IMAP_USER=
+PWMGR_IMAP_PASS=
+PWMGR_SMTP_HOST=smtp.qq.com
+PWMGR_SMTP_PORT=465
+PWMGR_SMTP_USER=
+PWMGR_SMTP_PASS=
+PWMGR_SMS_HOOK_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+PWMGR_ADMIN_SMS_HINT=
+EOF
+fi
+chown root:pwmanager "$ADMIN_ENV"; chmod 640 "$ADMIN_ENV"
+systemctl daemon-reload
+systemctl enable --now pwmanager-mail.timer >/dev/null 2>&1 || true
 
 # ---- 5) venv 与依赖 ----
 if [ ! -x "$VENV_DIR/bin/python" ]; then

@@ -15,8 +15,8 @@ from _ssh import connect
 
 CERT_DIR = f"{REMOTE_DIR}/certs"
 
-# 需要与远端保持一致的代码文件
-UPLOAD = ["main.py", "store.py", "auth.py", "manage.py"]
+# 需要与远端保持一致的代码文件（找回密码 mail_worker 一并同步）
+UPLOAD = ["main.py", "store.py", "auth.py", "manage.py", "mail_worker.py"]
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 
 

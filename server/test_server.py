@@ -81,7 +81,8 @@ def run():
     try:
         store.create_user_and_vault(
             username="alice", service_pwd_hash=b"\x00" * 32,
-            service_pwd_salt=b"\x00" * 16, email="x@y.z", phone="",
+            service_pwd_salt=b"\x00" * 16, contact_salt=b"\x00" * 16,
+            email_hash=b"\x00" * 32, phone_hash=None,
             pwd_time=1, label="x", ciphertext=b"c", ciphertext_sha256="0" * 64)
         raise AssertionError("重复用户名应抛 IntegrityError")
     except _sqlite3.IntegrityError:
@@ -138,7 +139,52 @@ def run():
                                   "X-Forwarded-For": "10.9.9.99"})
     assert r.status_code == 429, r.text
 
-    print("server v2.3 e2e: all ok")
+    # 11. 忘记密码：联系方式只存哈希 + 验证发件人后自动重置为 86868686
+    auth._attempts.clear()
+    import contacts as contacts_mod  # noqa: E402
+    import forgot as forgot_mod  # noqa: E402
+    import sqlite3 as _s  # noqa: E402
+
+    r = _reg(c, "erin", "password123", email="Erin@Example.COM ")
+    assert r.status_code == 200, r.text
+    conn = _s.connect(os.environ["PWMGR_DB"])
+    conn.row_factory = _s.Row
+    row = conn.execute("SELECT email, contact_salt, email_hash FROM users "
+                       "WHERE username='erin'").fetchone()
+    assert row["email"] == "", "明文邮箱必须清空"
+    assert row["contact_salt"] and row["email_hash"], "哈希列必须写入"
+    conn.close()
+
+    # 错误发件人：静默不重置，原密码仍有效
+    assert forgot_mod.attempt_reset("erin", "email", "attacker@evil.com") == "mismatch"
+    assert c.get("/vaults", headers=_auth("erin", "password123")).status_code == 200
+    # 正确发件人（大小写/空格归一化）→ 重置为 86868686
+    assert forgot_mod.attempt_reset("erin", "email", " erin@example.com ") == "ok"
+    assert c.get("/vaults", headers=_auth("erin", "password123")).status_code == 401
+    assert c.get("/vaults", headers=_auth("erin", "86868686")).status_code == 200
+    # 24h 节流
+    assert forgot_mod.attempt_reset("erin", "email", "erin@example.com") == "throttled"
+
+    # /contact：未配置时返回空串
+    assert c.get("/contact").json() == {"admin_email": "", "sms_hint": ""}
+
+    # 短信回调：token 未配置/错误 → 403
+    r = c.post("/internal/sms-up", json={"mobile": "13800138000", "text": "01frankd"},
+               params={"token": "bad"})
+    assert r.status_code == 403, r.text
+    r = c.post("/internal/sms-up", json={"mobile": "13800138000", "text": "01frankd"})
+    assert r.status_code == 403
+
+    # 配置 token 后：正确发件人（+86/分隔符归一化）→ 重置成功
+    os.environ["PWMGR_SMS_HOOK_TOKEN"] = "hook-token-1"
+    r = _reg(c, "frank", "password123", phone="+86 138-0013-8000")
+    assert r.status_code == 200, r.text
+    r = c.post("/internal/sms-up", json={"mobile": "13800138000", "text": "01frankd"},
+               params={"token": "hook-token-1"})
+    assert r.json() == {"handled": True, "reason": "ok"}, r.text
+    assert c.get("/vaults", headers=_auth("frank", "86868686")).status_code == 200
+
+    print("server v2.7 e2e: all ok")
 
 
 if __name__ == "__main__":

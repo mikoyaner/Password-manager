@@ -6,6 +6,8 @@
 import base64
 import binascii
 import hashlib
+import hmac
+import os
 import re
 import sqlite3
 
@@ -14,6 +16,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import auth
+import contacts
+import forgot
 import store
 
 app = FastAPI(title="PwdMgr Sync Server", version="2.3")
@@ -127,12 +131,46 @@ def _validate_username(username: str) -> None:
         raise HTTPException(status_code=400, detail={"error": "invalid_username"})
 
 
+# 短信找回码格式（用户要求）：01<用户名>d，如 01alicd 对应用户 alic（尾部 d 是短信标识）
+_SMS_CODE_RE = re.compile(r"^01([a-zA-Z0-9._-]{3,20})d$", re.IGNORECASE)
+
+
+class SmsUpReq(BaseModel):
+    mobile: str
+    text: str
+
+
 # ===== 端点 =====
 
 @app.get("/health")
 def health():
     # 不暴露账号数量：无认证端点只回答存活状态
     return {"status": "ok"}
+
+
+@app.get("/contact")
+def contact():
+    """找回密码联系方式（无认证）。未配置时返回空串，客户端展示"未配置"提示。"""
+    return {"admin_email": os.environ.get("PWMGR_ADMIN_EMAIL", ""),
+            "sms_hint": os.environ.get("PWMGR_ADMIN_SMS_HINT", "")}
+
+
+@app.post("/internal/sms-up")
+def sms_up(req: SmsUpReq, request: Request, token: str = ""):
+    """云短信上行回调（二期接入）：验证发件人手机号哈希后自动重置。
+
+    token 取 admin.env 的 PWMGR_SMS_HOOK_TOKEN（URL 参数或 X-Hook-Token 头）；
+    未配置 token 时端点整体拒绝。验证失败静默处理，不泄露账号存在性。
+    """
+    expect = os.environ.get("PWMGR_SMS_HOOK_TOKEN", "")
+    given = token or request.headers.get("x-hook-token", "")
+    if not expect or not hmac.compare_digest(given, expect):
+        raise HTTPException(status_code=403, detail={"error": "forbidden"})
+    m = _SMS_CODE_RE.match((req.text or "").strip())
+    if not m:
+        return {"handled": False, "reason": "bad_format"}
+    result = forgot.attempt_reset(m.group(1), "sms", req.mobile)
+    return {"handled": result == "ok", "reason": result}
 
 
 @app.post("/register")
@@ -148,6 +186,14 @@ def register(req: RegisterReq, request: Request):
         raise HTTPException(status_code=400, detail={"error": "invalid_email"})
     if phone and not _PHONE_RE.match(phone):
         raise HTTPException(status_code=400, detail={"error": "invalid_phone"})
+
+    # 隐私要求：联系方式只存加盐哈希（contacts.py），明文校验完即丢弃
+    contact_salt = contacts.new_salt()
+    try:
+        email_hash = contacts.contact_hash(contact_salt, "email", email) if email else None
+        phone_hash = contacts.contact_hash(contact_salt, "sms", phone) if phone else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"error": "invalid_contact"})
 
     # 先把可选的首版密文校验完再建账号：密文非法时不留下半个账号
     raw: bytes | None = None
@@ -170,8 +216,9 @@ def register(req: RegisterReq, request: Request):
             username=req.username,
             service_pwd_hash=verifier,
             service_pwd_salt=salt,
-            email=email,
-            phone=phone,
+            contact_salt=contact_salt,
+            email_hash=email_hash,
+            phone_hash=phone_hash,
             pwd_time=req.pwd_time,
             label=req.label,
             ciphertext=raw,

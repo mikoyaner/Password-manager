@@ -20,4 +20,9 @@
         android:layout_height="wrap_content" android:text="记住用户密码"
         android:checked="true" android:layout_marginTop="8dp" />
 
+    <Button android:id="@+id/forgot" style="?attr/borderlessButtonStyle"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal" android:layout_marginTop="8dp"
+        android:text="忘记密码？" android:textColor="#1E88E5" />
+
 </LinearLayout>

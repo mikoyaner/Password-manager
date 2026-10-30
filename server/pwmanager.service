@@ -8,6 +8,7 @@ Type=simple
 User=pwmanager
 Group=pwmanager
 WorkingDirectory=/opt/pwmanager/server
+EnvironmentFile=-/opt/pwmanager/server/admin.env
 Environment=PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
 Environment=PYTHONDONTWRITEBYTECODE=1
 # 直连 uvicorn（自签 TLS），刻意不设置 PWMGR_TRUST_PROXY：不信任 X-Forwarded-For

@@ -48,7 +48,11 @@ def init_db() -> None:
                    email            TEXT NOT NULL,
                    phone            TEXT NOT NULL,
                    created_at       INTEGER NOT NULL,
-                   last_login_at    INTEGER
+                   last_login_at    INTEGER,
+                   contact_salt     BLOB,
+                   email_hash       BLOB,
+                   phone_hash       BLOB,
+                   last_forgot_at   INTEGER
                )"""
         )
 
@@ -71,6 +75,7 @@ def init_db() -> None:
 
         cols = _cols(conn, "vaults")
         if "vid" in cols and "upload_time" in cols:
+            _migrate_user_contact_columns(conn)
             return  # 已是新结构
 
         # 旧结构（主键 username，无 vid）→ 迁移
@@ -86,6 +91,38 @@ def init_db() -> None:
         )
         conn.execute("DROP TABLE vaults_old")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_vaults_user ON vaults(username, upload_time)")
+        _migrate_user_contact_columns(conn)
+
+
+def _migrate_user_contact_columns(conn) -> None:
+    """v2.7：users 表加联系方式哈希列；存量明文转哈希后清空明文列（隐私要求）。"""
+    import contacts
+
+    ucols = _cols(conn, "users")
+    if "contact_salt" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN contact_salt BLOB")
+    if "email_hash" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN email_hash BLOB")
+    if "phone_hash" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_hash BLOB")
+    if "last_forgot_at" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN last_forgot_at INTEGER")
+
+    rows = conn.execute(
+        "SELECT username, email, phone FROM users "
+        "WHERE (email <> '' OR phone <> '') AND contact_salt IS NULL"
+    ).fetchall()
+    for r in rows:
+        csalt = contacts.new_salt()
+        email_hash = (contacts.contact_hash(csalt, "email", r["email"])
+                      if r["email"] else None)
+        phone_hash = (contacts.contact_hash(csalt, "sms", r["phone"])
+                      if r["phone"] else None)
+        conn.execute(
+            "UPDATE users SET contact_salt=?, email_hash=?, phone_hash=?, "
+            "email='', phone='' WHERE username=?",
+            (csalt, email_hash, phone_hash, r["username"]),
+        )
 
 
 # ===== 用户 =====
@@ -118,13 +155,16 @@ def touch_last_login(username: str) -> None:
 
 
 def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
-                          service_pwd_salt: bytes, email: str, phone: str,
+                          service_pwd_salt: bytes,
+                          contact_salt: bytes, email_hash: Optional[bytes],
+                          phone_hash: Optional[bytes],
                           pwd_time: Optional[int] = None, label: Optional[str] = None,
                           ciphertext: Optional[bytes] = None,
                           ciphertext_sha256: Optional[str] = None
                           ) -> tuple[int, Optional[int]]:
     """同一事务内建用户（可选带首版库）：要么都成功，要么一条都不留下。
 
+    联系方式只存哈希（contacts.py），明文列 email/phone 恒为空串。
     用户名已存在时由唯一约束抛 sqlite3.IntegrityError（调用方转 409）。
     返回 (created_at, first_vid 或 None)。
     """
@@ -132,8 +172,10 @@ def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
     with _lock, _connect() as conn:
         conn.execute(
             "INSERT INTO users(username, service_pwd_hash, service_pwd_salt, "
-            "email, phone, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-            (username, service_pwd_hash, service_pwd_salt, email, phone, now_ms),
+            "email, phone, created_at, contact_salt, email_hash, phone_hash) "
+            "VALUES(?, ?, ?, '', '', ?, ?, ?, ?)",
+            (username, service_pwd_hash, service_pwd_salt, now_ms,
+             contact_salt, email_hash, phone_hash),
         )
         vid: Optional[int] = None
         if ciphertext is not None:
@@ -145,6 +187,36 @@ def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
             vid = cur.lastrowid
             _trim_vaults(conn, username)
     return now_ms, vid
+
+
+def get_user_contact_row(username: str) -> Optional[dict]:
+    """找回密码用：该用户的联系方式哈希与节流时间戳。不存在返回 None。"""
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT username, contact_salt, email_hash, phone_hash, last_forgot_at "
+            "FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "username": row["username"],
+        "contact_salt": bytes(row["contact_salt"]) if row["contact_salt"] else None,
+        "email_hash": bytes(row["email_hash"]) if row["email_hash"] else None,
+        "phone_hash": bytes(row["phone_hash"]) if row["phone_hash"] else None,
+        "last_forgot_at": row["last_forgot_at"] or 0,
+    }
+
+
+def set_service_pwd_and_stamp(username: str, pwd_hash: bytes, pwd_salt: bytes,
+                              now_ms: int) -> None:
+    """忘记密码重置：写新 verifier 并盖 24h 节流时间戳。"""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
+            "last_forgot_at = ? WHERE username = ?",
+            (pwd_hash, pwd_salt, now_ms, username),
+        )
 
 
 def update_service_pwd(username: str, new_hash: bytes, new_salt: bytes) -> None:
