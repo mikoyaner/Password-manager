@@ -225,3 +225,4 @@ python E:\密码管理器\window\app.py
 - 每次重装自签证书，指纹要同步到两端。
 # Password-manager
 # mikoyaner-Password-manager
+# Password-manager
