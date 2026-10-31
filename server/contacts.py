@@ -3,9 +3,16 @@
 隐私设计：服务器**永不存明文**联系方式，只存 Argon2id 哈希；找回时对
 "发件人邮箱/手机号"做同样的归一化+哈希后比对。邮箱/手机号是低熵信息
 （手机号空间 ~1e11），故用与 §2.2 主密钥同参数的慢哈希抗离线枚举。
+
+唯一性（v2.7.1）：同一邮箱/手机号只能绑定一个账号。查重用 HMAC-SHA256
+查找哈希（contact_uniq，配 UNIQUE 索引），pepper 来自 admin.env 且
+**不进数据库**——数据库单独泄露时手机号不可被离线枚举；身份验证仍走
+Argon2id 加盐哈希，lookup 列不参与验证。
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
 
@@ -55,3 +62,21 @@ def contact_hash(salt: bytes, kind: str, value: str) -> bytes:
         hash_len=_LEN,
         type=Type.ID,
     )
+
+
+def contact_uniq(pepper: str, kind: str, value: str) -> str:
+    """查重哈希（HMAC-SHA256 hex）：配 UNIQUE 索引实现"一个联系方式只绑一个账号"。
+
+    pepper 取 admin.env 的 PWMGR_CONTACT_PEPPER（一次性设置，勿改）；
+    不进数据库。为空时唯一性仍生效，但抗枚举强度下降。
+    """
+    if kind == "email":
+        v = normalize_email(value)
+    elif kind == "sms":
+        v = normalize_phone(value)
+    else:
+        raise ValueError(f"unknown kind: {kind}")
+    if not v:
+        raise ValueError(f"empty normalized contact: {kind}")
+    return hmac.new(pepper.encode("utf-8"), f"{kind}:{v}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()

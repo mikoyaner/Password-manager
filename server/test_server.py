@@ -184,6 +184,13 @@ def run():
     assert r.json() == {"handled": True, "reason": "ok"}, r.text
     assert c.get("/vaults", headers=_auth("frank", "86868686")).status_code == 200
 
+    # 12. 联系方式唯一性：A 绑定的邮箱/手机，B 不能再绑（归一化后比对）
+    r = _reg(c, "gina", "password123", email="ERIN@example.com")
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "contact_taken", r.text
+    r = _reg(c, "gina", "password123", phone="138 0013 8000")
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "contact_taken", r.text
+    assert c.get("/vaults", headers=_auth("gina", "password123")).status_code == 401
+
     print("server v2.7 e2e: all ok")
 
 

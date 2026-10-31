@@ -98,6 +98,7 @@ PWMGR_SMTP_PORT=465
 PWMGR_SMTP_USER=
 PWMGR_SMTP_PASS=
 PWMGR_SMS_HOOK_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+PWMGR_CONTACT_PEPPER=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 PWMGR_ADMIN_SMS_HINT=
 EOF
 fi

@@ -52,7 +52,9 @@ def init_db() -> None:
                    contact_salt     BLOB,
                    email_hash       BLOB,
                    phone_hash       BLOB,
-                   last_forgot_at   INTEGER
+                   last_forgot_at   INTEGER,
+                   email_uniq       TEXT,
+                   phone_uniq       TEXT
                )"""
         )
 
@@ -71,6 +73,7 @@ def init_db() -> None:
         ).fetchone() is None:
             conn.execute(new_ddl)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_vaults_user ON vaults(username, upload_time)")
+            _migrate_user_contact_columns(conn)
             return
 
         cols = _cols(conn, "vaults")
@@ -107,6 +110,15 @@ def _migrate_user_contact_columns(conn) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN phone_hash BLOB")
     if "last_forgot_at" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN last_forgot_at INTEGER")
+    # 查重哈希列（v2.7.1）：一个联系方式只绑一个账号（HMAC 查找列 + 部分唯一索引）
+    if "email_uniq" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN email_uniq TEXT")
+    if "phone_uniq" not in ucols:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_uniq TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_uniq "
+                 "ON users(email_uniq) WHERE email_uniq IS NOT NULL")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_uniq "
+                 "ON users(phone_uniq) WHERE phone_uniq IS NOT NULL")
 
     rows = conn.execute(
         "SELECT username, email, phone FROM users "
@@ -158,24 +170,27 @@ def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
                           service_pwd_salt: bytes,
                           contact_salt: bytes, email_hash: Optional[bytes],
                           phone_hash: Optional[bytes],
+                          email_uniq: Optional[str] = None,
+                          phone_uniq: Optional[str] = None,
                           pwd_time: Optional[int] = None, label: Optional[str] = None,
                           ciphertext: Optional[bytes] = None,
                           ciphertext_sha256: Optional[str] = None
                           ) -> tuple[int, Optional[int]]:
     """同一事务内建用户（可选带首版库）：要么都成功，要么一条都不留下。
 
-    联系方式只存哈希（contacts.py），明文列 email/phone 恒为空串。
-    用户名已存在时由唯一约束抛 sqlite3.IntegrityError（调用方转 409）。
+    联系方式只存哈希（contacts.py），明文列 email/phone 恒为空串；
+    email_uniq/phone_uniq 配唯一索引实现"一个联系方式只绑一个账号"。
+    用户名或联系方式重复时抛 sqlite3.IntegrityError（调用方转 409）。
     返回 (created_at, first_vid 或 None)。
     """
     now_ms = int(time.time() * 1000)
     with _lock, _connect() as conn:
         conn.execute(
             "INSERT INTO users(username, service_pwd_hash, service_pwd_salt, "
-            "email, phone, created_at, contact_salt, email_hash, phone_hash) "
-            "VALUES(?, ?, ?, '', '', ?, ?, ?, ?)",
+            "email, phone, created_at, contact_salt, email_hash, phone_hash, "
+            "email_uniq, phone_uniq) VALUES(?, ?, ?, '', '', ?, ?, ?, ?, ?, ?)",
             (username, service_pwd_hash, service_pwd_salt, now_ms,
-             contact_salt, email_hash, phone_hash),
+             contact_salt, email_hash, phone_hash, email_uniq, phone_uniq),
         )
         vid: Optional[int] = None
         if ciphertext is not None:
@@ -187,6 +202,18 @@ def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
             vid = cur.lastrowid
             _trim_vaults(conn, username)
     return now_ms, vid
+
+
+def contact_taken(email_uniq: Optional[str], phone_uniq: Optional[str]) -> bool:
+    """注册查重：该邮箱/手机号的查找哈希是否已被其他账号占用。"""
+    if not email_uniq and not phone_uniq:
+        return False
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE email_uniq = ? OR phone_uniq = ?",
+            (email_uniq, phone_uniq),
+        ).fetchone()
+    return row is not None
 
 
 def get_user_contact_row(username: str) -> Optional[dict]:

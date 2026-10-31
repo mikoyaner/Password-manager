@@ -187,13 +187,20 @@ def register(req: RegisterReq, request: Request):
     if phone and not _PHONE_RE.match(phone):
         raise HTTPException(status_code=400, detail={"error": "invalid_phone"})
 
-    # 隐私要求：联系方式只存加盐哈希（contacts.py），明文校验完即丢弃
+    # 隐私要求：联系方式只存加盐哈希（contacts.py），明文校验完即丢弃。
+    # 另存 HMAC 查找哈希（pepper 不进库）用于注册查重：一个联系方式只绑一个账号。
+    pepper = os.environ.get("PWMGR_CONTACT_PEPPER", "")
     contact_salt = contacts.new_salt()
     try:
         email_hash = contacts.contact_hash(contact_salt, "email", email) if email else None
         phone_hash = contacts.contact_hash(contact_salt, "sms", phone) if phone else None
+        email_uniq = contacts.contact_uniq(pepper, "email", email) if email else None
+        phone_uniq = contacts.contact_uniq(pepper, "sms", phone) if phone else None
     except ValueError:
         raise HTTPException(status_code=400, detail={"error": "invalid_contact"})
+    if store.contact_taken(email_uniq, phone_uniq):
+        auth.record_failure(ip)
+        raise HTTPException(status_code=409, detail={"error": "contact_taken"})
 
     # 先把可选的首版密文校验完再建账号：密文非法时不留下半个账号
     raw: bytes | None = None
@@ -219,13 +226,18 @@ def register(req: RegisterReq, request: Request):
             contact_salt=contact_salt,
             email_hash=email_hash,
             phone_hash=phone_hash,
+            email_uniq=email_uniq,
+            phone_uniq=phone_uniq,
             pwd_time=req.pwd_time,
             label=req.label,
             ciphertext=raw,
             ciphertext_sha256=(hashlib.sha256(raw).hexdigest() if raw is not None else None),
         )
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
         auth.record_failure(ip)
+        # 唯一索引兜底并发：联系方式冲突与用户名冲突分别提示
+        if "uniq" in str(e).lower():
+            raise HTTPException(status_code=409, detail={"error": "contact_taken"})
         raise HTTPException(status_code=409, detail={"error": "username_taken"})
     except Exception as e:
         auth.record_failure(ip)
