@@ -1,25 +1,33 @@
-"""找回密码邮件轮询 worker（v2.7 一期：邮箱找回全自动）。
+"""找回密码邮件轮询 worker（v2.8：两步确认 + 随机临时密码）。
 
 由 pwmanager-mail.timer 每 60s 触发一次（单次执行后退出）：
-  IMAP 取管理员邮箱未读邮件 → 主题/正文找 01<用户名> → 归一化发件人邮箱 →
-  与注册哈希比对 → 重置为 86868686 → SMTP 回复原邮件 → 无论结果一律标记已读。
+  IMAP 取管理员邮箱未读邮件（BODY.PEEK，不打乱未读状态）→
+  - 含 01<用户名> 且发件人哈希匹配 → 自动回复**确认码**（15 分钟有效）→ 标已读；
+  - 含待确认的**确认码**（发件人相同）→ 生成随机临时密码回复用户 → 重置 → 标已读；
+  - 验证失败（码存在但发件人不匹配）→ 丢弃 + 标已读；
+  - 其他无关邮件：**保持未读、不改动**（Message-ID 记入状态文件防重复扫描）。
 
-配置全部来自环境变量（systemd EnvironmentFile=admin.env 注入）：
+配置全部来自环境变量（systemd EnvironmentFile=mail.env 注入）：
   PWMGR_IMAP_HOST / PWMGR_IMAP_USER / PWMGR_IMAP_PASS
   PWMGR_SMTP_HOST / PWMGR_SMTP_PORT / PWMGR_SMTP_USER / PWMGR_SMTP_PASS
-  PWMGR_ADMIN_EMAIL（回复时的发件人 = 接收找回邮件的同一邮箱）
-IMAP/SMTP 未配置时打印提示并以 0 退出（先上线代码、后补配置）。
+未配置时打印提示并以 0 退出（先上线代码、后补配置）。
 
-安全：验证失败的邮件静默忽略（不回复，不泄露账号存在性），但标记已读。
+安全：临时密码只回复给"通过哈希验证的发件邮箱"，伪造 From 的邮件即使被处理，
+确认码/临时密码也只会发往真正的邮箱主人；验证失败静默丢弃；临时密码绝不写日志。
+每轮最多处理 10 封（Argon2 放大防护，见审计报告 P1-8）。
 """
 from __future__ import annotations
 
+import hashlib
+import html as _html
 import imaplib
+import json
 import logging
 import os
 import re
 import smtplib
 import sys
+import time
 from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
@@ -32,22 +40,99 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("pwmanager.mail")
 
-# 邮件里的找回码：01<用户名>（负向断言防止匹配更长串的前缀）
-_CODE_RE = re.compile(r"01([a-zA-Z0-9._-]{3,20})(?![a-zA-Z0-9._-])")
+# 邮件里的找回码：01<用户名>（允许 01 与用户名之间有空格；大小写不敏感——
+# 查库时用 COLLATE NOCASE；负向断言防止匹配更长串的前缀）
+_CODE_RE = re.compile(r"01\s*([a-zA-Z0-9._-]{3,20})(?![a-zA-Z0-9._-])", re.IGNORECASE)
 
 # 用户指定：邮件接收时间与服务器时间相差不得超过 60 分钟，超时旧邮件直接丢弃
 _FRESH_SECONDS = 60 * 60
+_HTML_TAG = re.compile(r"<[^>]+>")
+_MAX_PROCESSED_PER_RUN = 10   # 每轮最多处理的找回邮件数（Argon2 放大防护）
+_SCAN_STATE_MAX = 500         # 无关邮件 Message-ID 去重状态上限
 
-RESET_REPLY = (
-    "你的用户密码已重置为初始密码：86868686\n\n"
-    "请使用该密码登录，并立即在客户端『修改用户密码』中设置新密码。\n"
-    "（本邮件由系统自动发送）"
-)
+
+def _scan_state_path() -> str:
+    return forgot._audit_path() + ".scan.json"
+
+
+def _load_scan_state() -> set:
+    try:
+        with open(_scan_state_path(), encoding="utf-8") as f:
+            return set(json.load(f).get("seen_ids", []))
+    except Exception:
+        return set()
+
+
+def _save_scan_state(ids: set) -> None:
+    try:
+        keep = list(ids)[-_SCAN_STATE_MAX:]
+        with open(_scan_state_path(), "w", encoding="utf-8") as f:
+            json.dump({"seen_ids": keep}, f)
+    except Exception:
+        log.exception("scan state save failed")
+
+
+def _mail_id(msg, raw: bytes) -> str:
+    mid = str(msg.get("Message-ID", "")).strip()
+    if mid:
+        return mid
+    return "sha1:" + hashlib.sha1(raw).hexdigest()
+
+
+def _part_text(p) -> str:
+    try:
+        return p.get_content()
+    except Exception:
+        try:
+            return p.get_payload(decode=True).decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+
+def _message_text(msg) -> str:
+    """主题 + 正文文本。
+
+    网页版邮箱（189/126 等）默认只发 HTML：没有纯文本部分时剥掉 HTML 标签
+    参与匹配，否则正文里的验证码会读不到。
+    """
+    parts = [str(msg.get("Subject", ""))]
+    plains, htmls = [], []
+    if msg.is_multipart():
+        for p in msg.walk():
+            ct = p.get_content_type()
+            if ct == "text/plain":
+                plains.append(_part_text(p))
+            elif ct == "text/html":
+                htmls.append(_part_text(p))
+    else:
+        ct = msg.get_content_type()
+        if ct == "text/plain":
+            plains.append(_part_text(msg))
+        elif ct == "text/html":
+            htmls.append(_part_text(msg))
+    parts += plains if plains else htmls
+    text = "\n".join(parts)
+    if htmls and not plains:
+        text = _html.unescape(_HTML_TAG.sub(" ", text))
+    return text
 
 
 def _extract_code(text: str) -> str | None:
     m = _CODE_RE.search(text or "")
     return m.group(1) if m else None
+
+
+def _find_pending_token(text: str, sender: str) -> str | None:
+    """正文/主题里是否包含该发件人名下的待确认码。"""
+    pending = forgot._load_pending()
+    for token, entry in pending.items():
+        if entry.get("sender", "").strip().lower() != sender.strip().lower():
+            continue
+        if entry.get("exp", 0) < time.time():
+            continue
+        if token.lower() in (text or "").lower():
+            return token
+    return None
 
 
 def _is_fresh(msg) -> bool:
@@ -64,25 +149,7 @@ def _is_fresh(msg) -> bool:
     return abs((datetime.now(timezone.utc) - dt).total_seconds()) <= _FRESH_SECONDS
 
 
-def _message_text(msg) -> str:
-    """主题 + 所有 text/plain 部件拼接（找回码可能写在主题或正文）。"""
-    parts = [str(msg.get("Subject", ""))]
-    if msg.is_multipart():
-        for p in msg.walk():
-            if p.get_content_type() == "text/plain":
-                try:
-                    parts.append(p.get_content())
-                except Exception:
-                    parts.append(p.get_payload(decode=True).decode("utf-8", "replace"))
-    elif msg.get_content_type() == "text/plain":
-        try:
-            parts.append(msg.get_content())
-        except Exception:
-            parts.append(msg.get_payload(decode=True).decode("utf-8", "replace"))
-    return "\n".join(parts)
-
-
-def _smtp_send_reply(to_addr: str) -> None:
+def _smtp_send(to_addr: str, subject: str, body: str) -> None:
     admin = os.environ["PWMGR_ADMIN_EMAIL"]
     host = os.environ["PWMGR_SMTP_HOST"]
     port = int(os.environ.get("PWMGR_SMTP_PORT", "465"))
@@ -92,8 +159,8 @@ def _smtp_send_reply(to_addr: str) -> None:
     mail = EmailMessage()
     mail["From"] = admin
     mail["To"] = to_addr
-    mail["Subject"] = "密码重置完成"
-    mail.set_content(RESET_REPLY)
+    mail["Subject"] = subject
+    mail.set_content(body)
 
     if port == 465:
         server = smtplib.SMTP_SSL(host, port, timeout=30)
@@ -105,36 +172,70 @@ def _smtp_send_reply(to_addr: str) -> None:
         server.send_message(mail)
     finally:
         server.quit()
-    log.info("replied to requester")
 
 
-def _process_message(raw: bytes) -> None:
-    msg = BytesParser(policy=policy.default).parsebytes(raw)
+def _process_message(msg, raw: bytes) -> str:
+    """处理一封未读邮件，返回 'code' / 'token' / 'skip'。
+
+    'code'   = 带找回码的邮件（应答后标已读）
+    'token'  = 带确认码的邮件（应答后标已读）
+    'skip'   = 无关邮件（保持未读，仅记录扫描状态）
+    """
     sender = parseaddr(str(msg.get("From", "")))[1]
+    text = _message_text(msg)
+
     if not _is_fresh(msg):
         log.info("mail older than %ds: discarded", _FRESH_SECONDS)
         forgot.audit("FRESH_SKIP", user="-", channel="email", sender=sender,
                      detail="mail older than 60min, discarded")
-        return
-    code = _extract_code(_message_text(msg))
+        return "skip"
+
+    if sender:
+        token = _find_pending_token(text, sender)
+        if token:
+            result, temp = forgot.confirm_reset(token, sender)
+            if result == "ok":
+                _smtp_send(sender, "您的临时密码",
+                           "你的用户密码已重置为随机临时密码：\n\n"
+                           f"{temp}\n\n"
+                           "请立即用它登录，并马上在客户端『修改用户密码』中"
+                           "设置你自己的新密码。\n（本邮件由系统自动发送）")
+                log.info("two-step reset completed")
+                return "token"
+            if result == "throttled":
+                _smtp_send(sender, "密码重置请求已收到",
+                           "该账号 24 小时内已处理过重置。如果当时的新密码不是你设置的，"
+                           "请检查重置邮件；若你已自行修改过密码，请直接用新密码登录。")
+                log.info("two-step reset throttled")
+                return "token"
+            log.info("token confirm failed: %s", result)
+            return "skip"
+
+    code = _extract_code(text)
     if not code or not sender:
-        log.info("mail without code/sender: discarded")
-        forgot.audit("NO_CODE", channel="email", sender=sender,
-                     detail="no 01<username> code or no sender")
-        return
-    result = forgot.attempt_reset(code, "email", sender)
+        log.info("mail without code/token: left unread")
+        return "skip"
+
+    result, token = forgot.issue_token(code, "email", sender)
     if result == "ok":
-        try:
-            _smtp_send_reply(sender)
-        except Exception:
-            log.exception("reset ok but reply failed (user can still log in)")
-    elif result == "throttled":
-        # 24h 内已重置过：回复提示而不是静默，避免用户以为没处理
-        try:
-            _smtp_send_reply(sender)
-        except Exception:
-            log.exception("throttle reply failed")
-        log.info("throttled reset request")
+        _smtp_send(sender, "密码重置确认码",
+                   f"确认码：{token}\n\n"
+                   f"有效期 15 分钟。请**回复本邮件**（或用同一邮箱再发一封），"
+                   f"正文中包含该确认码，系统确认后会把随机临时密码发送到本邮箱。\n"
+                   "（本邮件由系统自动发送）")
+        log.info("confirmation code issued")
+        return "code"
+    if result == "mismatch":
+        # 验证码存在但发件人与注册绑定不符：按用户规格丢弃 + 标已读
+        log.info("code with mismatched sender: discarded")
+        forgot.audit("MISMATCH_DISCARD", user=code, channel="email", sender=sender)
+        return "code"
+    if result == "no_user":
+        log.info("code for unknown user: discarded")
+        forgot.audit("NO_USER", user=code, channel="email", sender=sender)
+        return "code"
+    log.info("issue failed: %s", result)
+    return "skip"
 
 
 def main() -> int:
@@ -144,15 +245,15 @@ def main() -> int:
     # 审计日志清理（用户指定：每 180 天执行一次，删除 90 天前的日志行）
     forgot.cleanup_if_due()
     if not (imap_host and imap_user and imap_pass):
-        log.info("IMAP 未配置（admin.env），本次跳过")
+        log.info("IMAP 未配置（mail.env），本次跳过")
         return 0
 
+    seen_ids = _load_scan_state()
     imap = imaplib.IMAP4_SSL(imap_host)
     try:
         imap.login(imap_user, imap_pass)
         # 网易（163/126）IMAP 的防滥用要求：登录后必须先发 ID 命令标识客户端，
-        # 否则后续 SELECT 会被拒绝（select 报 NO / SEARCH 报 illegal in state AUTH）。
-        # 其他服务商不支持 ID 时静默忽略。
+        # 否则后续 SELECT 会被拒绝。其他服务商不支持 ID 时静默忽略。
         try:
             imaplib.Commands["ID"] = ("AUTH", "SELECTED")
             imap._simple_command("ID", '("name" "PwdMgr" "version" "1.0")')
@@ -167,19 +268,34 @@ def main() -> int:
             return 1
         ids = data[0].split()
         log.info("unseen mails: %d", len(ids))
+
+        processed = 0
         for num in ids:
-            typ, parts = imap.fetch(num, "(RFC822)")
+            # BODY.PEEK：不打乱未读状态；无关邮件保持原样（用户指定）
+            typ, parts = imap.fetch(num, "(BODY.PEEK[])")
             if typ != "OK" or not parts or parts[0] is None:
                 log.warning("IMAP fetch failed for num=%s: typ=%s parts=%s",
                             num, typ, len(parts) if parts else 0)
                 continue
             raw = parts[0][1]
+            msg = BytesParser(policy=policy.default).parsebytes(raw)
             try:
-                _process_message(raw)
+                kind = _process_message(msg, raw)
             except Exception:
                 log.exception("failed to process one mail")
-            # 无论成功/失败/无码，都标记已读，避免同一封邮件反复处理
-            imap.store(num, "+FLAGS", "\\Seen")
+                kind = "skip"
+            mid = _mail_id(msg, raw)
+            if kind in ("code", "token"):
+                # 用户指定：只有找回相关的邮件才标已读
+                imap.store(num, "+FLAGS", "\\Seen")
+                seen_ids.add(mid)
+                processed += 1
+                if processed >= _MAX_PROCESSED_PER_RUN:
+                    log.info("per-run processing cap reached (%d)", processed)
+                    break
+            else:
+                seen_ids.add(mid)   # 无关邮件不标已读，仅去重防重复扫描
+        _save_scan_state(seen_ids)
         return 0
     finally:
         try:

@@ -200,7 +200,6 @@ public class HomeActivity extends AppCompatActivity {
                 else SecretStore.deleteServicePwd(this, account);
                 storage.setLastAccount(account);
                 runOnUiThread(() -> {
-                    ForgotPwd.warnIfInitialPwd(this, servicePwd);
                     int k = vaults == null ? 0 : vaults.length();
                     if (k == 0) {
                         new AlertDialog.Builder(this).setTitle("登录成功")

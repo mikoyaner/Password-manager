@@ -7,6 +7,7 @@
   list/download 自己名下的库。upload_time（服务器时钟）用于"保留最新5份、超了删最旧"。
 - 用户标签(username)与 upload_time 只存这些明文 DB 列，**不进密文**；下载回传后客户端不落地它们。
 """
+import logging
 import os
 import sqlite3
 import threading
@@ -16,6 +17,7 @@ from typing import Optional
 _DB_PATH = os.environ.get(
     "PWMGR_DB", os.path.join(os.path.dirname(__file__), "pwmanager.db")
 )
+log = logging.getLogger("pwmanager.store")
 _lock = threading.Lock()
 
 # 每个用户名在云端最多保留几份历史库（超了按 upload_time 从旧到新删）
@@ -98,7 +100,14 @@ def init_db() -> None:
 
 
 def _migrate_user_contact_columns(conn) -> None:
-    """v2.7：users 表加联系方式哈希列；存量明文转哈希后清空明文列（隐私要求）。"""
+    """v2.7/v2.8：users 表加联系方式哈希+查重列；存量明文转哈希后清空明文列。
+
+    审计报告 P1-5：
+    - 查重列按当前 PWMGR_CONTACT_PEPPER 回填（pepper 缺失时跳过并告警，
+      对应账号的唯一性保护降级，重绑后恢复）；
+    - 退化值（如纯符号"------"的手机号）逐行 try/except 跳过并记录，不让
+      init_db 整体失败。
+    """
     import contacts
 
     ucols = _cols(conn, "users")
@@ -120,21 +129,37 @@ def _migrate_user_contact_columns(conn) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_uniq "
                  "ON users(phone_uniq) WHERE phone_uniq IS NOT NULL")
 
+    pepper = os.environ.get("PWMGR_CONTACT_PEPPER", "")
     rows = conn.execute(
         "SELECT username, email, phone FROM users "
         "WHERE (email <> '' OR phone <> '') AND contact_salt IS NULL"
     ).fetchall()
     for r in rows:
         csalt = contacts.new_salt()
-        email_hash = (contacts.contact_hash(csalt, "email", r["email"])
-                      if r["email"] else None)
-        phone_hash = (contacts.contact_hash(csalt, "sms", r["phone"])
-                      if r["phone"] else None)
+        email_hash = phone_hash = email_uniq = phone_uniq = None
+        if r["email"]:
+            try:
+                email_hash = contacts.contact_hash(csalt, "email", r["email"])
+                email_uniq = (contacts.contact_uniq(pepper, "email", r["email"])
+                              if pepper else None)
+            except ValueError:
+                log.warning("迁移跳过无效邮箱 user=%s", r["username"])
+        if r["phone"]:
+            try:
+                phone_hash = contacts.contact_hash(csalt, "sms", r["phone"])
+                phone_uniq = (contacts.contact_uniq(pepper, "sms", r["phone"])
+                              if pepper else None)
+            except ValueError:
+                log.warning("迁移跳过无效手机号 user=%s", r["username"])
         conn.execute(
             "UPDATE users SET contact_salt=?, email_hash=?, phone_hash=?, "
-            "email='', phone='' WHERE username=?",
-            (csalt, email_hash, phone_hash, r["username"]),
+            "email_uniq=?, phone_uniq=?, email='', phone='' WHERE username=?",
+            (csalt, email_hash, phone_hash, email_uniq, phone_uniq,
+             r["username"]),
         )
+    if not pepper and rows:
+        log.warning("PWMGR_CONTACT_PEPPER 未设置：本次迁移的账号查重列未回填，"
+                    "唯一性保护降级（可用 set_contact 重绑恢复）")
 
 
 # ===== 用户 =====
@@ -221,7 +246,7 @@ def get_user_contact_row(username: str) -> Optional[dict]:
     with _lock, _connect() as conn:
         row = conn.execute(
             "SELECT username, contact_salt, email_hash, phone_hash, last_forgot_at "
-            "FROM users WHERE username = ?",
+            "FROM users WHERE username = ? COLLATE NOCASE",
             (username,),
         ).fetchone()
     if row is None:
@@ -237,11 +262,14 @@ def get_user_contact_row(username: str) -> Optional[dict]:
 
 def set_service_pwd_and_stamp(username: str, pwd_hash: bytes, pwd_salt: bytes,
                               now_ms: int) -> None:
-    """忘记密码重置：写新 verifier 并盖 24h 节流时间戳。"""
+    """忘记密码重置：写新 verifier 并盖 24h 节流时间戳。
+
+    用户名不区分大小写（找回码可能大小写不同；注册名本身保持原样）。
+    """
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
-            "last_forgot_at = ? WHERE username = ?",
+            "last_forgot_at = ? WHERE username = ? COLLATE NOCASE",
             (pwd_hash, pwd_salt, now_ms, username),
         )
 
@@ -256,7 +284,7 @@ def set_contact_hash(username: str, kind: str, value: str,
 
     with _lock, _connect() as conn:
         row = conn.execute(
-            "SELECT contact_salt FROM users WHERE username = ?",
+            "SELECT contact_salt FROM users WHERE username = ? COLLATE NOCASE",
             (username,),
         ).fetchone()
         if row is None or row["contact_salt"] is None:
@@ -269,7 +297,7 @@ def set_contact_hash(username: str, kind: str, value: str,
         # 管理员重绑视为重新起算：清除 24h 找回节流标记
         conn.execute(
             f"UPDATE users SET {col} = ?, {ucol} = ?, last_forgot_at = NULL "
-            "WHERE username = ?",
+            "WHERE username = ? COLLATE NOCASE",
             (h, u, username),
         )
 

@@ -257,7 +257,6 @@ public class MainActivity extends AppCompatActivity {
                 storage.setLastAccount(account);
                 runOnUiThread(() -> {
                     if (isFinishing() || isDestroyed()) return;
-                    ForgotPwd.warnIfInitialPwd(this, servicePwd);
                     int k = vaults == null ? 0 : vaults.length();
                     status.setText("已登录 @" + account + " · 云端 " + k + " 份");
                     chooseAction(account, servicePwd, vaults, k);

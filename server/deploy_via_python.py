@@ -16,7 +16,8 @@ import sys
 from _deploy_secrets import HOST, USER, REMOTE_DIR, OLD_DIR, validate
 from _ssh import connect
 
-SERVER_FILES = ["main.py", "store.py", "auth.py", "manage.py", "mail_worker.py"]
+SERVER_FILES = ["main.py", "store.py", "auth.py", "contacts.py", "forgot.py",
+                "mail_worker.py", "manage.py"]
 EXTRA_FILES = ["requirements.txt", "pwmanager.service",
                "pwmanager-mail.service", "pwmanager-mail.timer", "server_setup.sh"]
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))

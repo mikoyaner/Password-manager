@@ -9,14 +9,15 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 /**
- * 忘记密码（v2.7）：输入用户名 → 从服务器 /contact 取管理员联系方式 →
- * 显示自助重置说明。用户用注册时的邮箱/手机号发出「01用户名」邮件 /
- * 「01用户名d」短信，服务器验证发件人哈希后自动把用户密码重置为 86868686。
- * 邮件联系方式与验证逻辑见服务端 contacts.py / forgot.py。
+ * 忘记密码（v2.8 两步确认）：输入用户名 → 从服务器 /contact 取管理员联系方式 →
+ * 显示自助重置说明。流程：
+ *   1) 用注册时的邮箱发送「01用户名」到管理员邮箱；
+ *   2) 系统自动回复一封确认码邮件（15 分钟有效）；
+ *   3) 回复那封邮件（或用同一邮箱再发一封），正文中包含确认码；
+ *   4) 系统再把随机临时密码发到该邮箱，用它登录并立即修改密码。
+ * 安全：全程不存在固定密码；确认码证明"能收信"，伪造发件人拿不到任何凭据。
  */
 public final class ForgotPwd {
-
-    public static final String INIT_PWD = "86868686";
 
     private ForgotPwd() {}
 
@@ -53,10 +54,10 @@ public final class ForgotPwd {
                 msg = "用户名：" + username + "\n\n"
                         + "1. 用注册时的邮箱发送内容「01" + username + "」到 "
                         + (email.isEmpty() ? "（服务器未配置找回邮箱）" : email) + "\n"
-                        + "2. 或用注册时的手机号发送短信「01" + username + "d」"
-                        + (hint.isEmpty() ? "（服务器未配置短信入口）" : "：" + hint) + "\n\n"
-                        + "管理员核实后将自动把你的用户密码重置为 " + INIT_PWD
-                        + "（约 1 分钟内生效）。\n用 " + INIT_PWD + " 登录后请立即修改用户密码。";
+                        + "2. 系统自动回复一封确认码邮件（15 分钟内有效）\n"
+                        + "3. 回复那封邮件（或用同一邮箱再发一封），正文中包含确认码\n"
+                        + "4. 系统再把随机临时密码发到你的邮箱，用它登录并立即修改密码\n\n"
+                        + "短信通道：" + (hint.isEmpty() ? "（服务器未配置，人工处理较慢）" : hint);
             } catch (final Exception e) {
                 msg = "获取失败: " + e.getMessage();
             }
@@ -67,16 +68,5 @@ public final class ForgotPwd {
                     .setPositiveButton("好", null)
                     .show());
         }).start();
-    }
-
-    /** 用初始密码登录成功后提醒立即修改。 */
-    public static void warnIfInitialPwd(final AppCompatActivity act, String servicePwd) {
-        if (!INIT_PWD.equals(servicePwd)) return;
-        act.runOnUiThread(() -> new AlertDialog.Builder(act)
-                .setTitle("初始密码")
-                .setMessage("当前使用的是找回重置后的初始密码，请立即在"
-                        + "『设置 → 修改用户密码』中设置新密码。")
-                .setPositiveButton("知道了", null)
-                .show());
     }
 }

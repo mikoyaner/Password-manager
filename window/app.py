@@ -569,13 +569,15 @@ class ForgotPwdDialog(QDialog):
         admin_email = (ct or {}).get("admin_email", "")
         sms_hint = (ct or {}).get("sms_hint", "")
         email_line = f"到 **{admin_email}**" if admin_email else "——服务器未配置找回邮箱——"
-        sms_line = f"到：**{sms_hint}**" if sms_hint else "——服务器未配置短信入口——"
+        sms_line = f"到：**{sms_hint}**" if sms_hint else "——服务器未配置短信入口（短信为人工通道，较慢）——"
         self.info.setText(
             f"用户名：{u}\n\n"
             f"1. 用**注册时的邮箱**发送内容「01{u}」{email_line}\n"
-            f"2. 或用**注册时的手机号**发送短信「01{u}d」{sms_line}\n\n"
-            "管理员核实后将自动把你的用户密码重置为 **86868686**（约 1 分钟内生效）。\n"
-            "用 86868686 登录后，请立即在菜单『账户/同步 → 修改用户密码』修改。")
+            f"2. 系统自动回复一封**确认码**邮件（15 分钟内有效）\n"
+            f"3. **回复那封邮件**（或用同一邮箱再发一封），正文中包含确认码\n"
+            f"4. 系统再把**随机临时密码**发到你的邮箱，用它登录并立即修改密码\n\n"
+            f"短信通道（{sms_line}）为人工处理，速度较慢，推荐使用邮箱。\n"
+            "全程只需能收发你的注册邮箱；服务器不存任何明文联系方式。")
 
 
 class SyncDialog(QDialog):
@@ -723,11 +725,6 @@ class SyncDialog(QDialog):
         finally:
             self.login_btn.setEnabled(True)
             self.register_btn.setEnabled(True)
-        if p == "86868686":
-            QMessageBox.warning(
-                self, "初始密码",
-                "当前使用的是找回重置后的初始密码，请立即在菜单\n"
-                "『账户/同步 → 修改用户密码』中设置新密码。")
         if vaults:
             latest = vaults[0]
             self.action_info.setText(

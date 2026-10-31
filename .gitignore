@@ -17,6 +17,9 @@ __pycache__/
 server/.env
 server/deploy_key
 server/deploy_key.pub
+server/admin.env
+server/api.env
+server/mail.env
 
 # 证书与私钥（服务器自签证书不要进仓库）
 server/certs/

@@ -7,6 +7,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import logging
 import os
 import re
 import sqlite3
@@ -19,6 +20,8 @@ import auth
 import contacts
 import forgot
 import store
+
+log = logging.getLogger("pwmanager.api")
 
 app = FastAPI(title="PwdMgr Sync Server", version="2.3")
 
@@ -79,6 +82,10 @@ _PHONE_RE = re.compile(r"^[0-9+\-() ]{6,20}$")
 @app.on_event("startup")
 def _startup() -> None:
     store.init_db()
+    # 审计报告 P2：pepper 缺失时查重列仍工作，但抗枚举强度下降——显著警告
+    if not os.environ.get("PWMGR_CONTACT_PEPPER"):
+        log.warning("PWMGR_CONTACT_PEPPER 未配置：联系方式查重列抗枚举强度下降，"
+                    "请在 api.env 中设置并重启")
 
 
 # ===== 请求模型 =====
@@ -149,34 +156,51 @@ def health():
 
 
 @app.get("/contact")
-def contact():
-    """找回密码联系方式（无认证）。未配置时返回空串，客户端展示"未配置"提示。"""
+def contact(request: Request):
+    """找回密码联系方式（无认证）。
+
+    审计报告 P1-9：该地址是面向全体用户的公共服务入口，建议运维配置
+    **专用别名邮箱**而非个人邮箱；此端点加匿名限流防爬取。
+    """
+    auth.rate_limit(f"contact:{_client_ip(request)}", 30, 60)
     return {"admin_email": os.environ.get("PWMGR_ADMIN_EMAIL", ""),
             "sms_hint": os.environ.get("PWMGR_ADMIN_SMS_HINT", "")}
 
 
 @app.post("/internal/sms-up")
-def sms_up(req: SmsUpReq, request: Request, token: str = ""):
-    """云短信上行回调（二期接入）：验证发件人手机号哈希后自动重置。
+def sms_up(req: SmsUpReq, request: Request):
+    """云短信上行回调（二期接入）。
 
-    token 取 admin.env 的 PWMGR_SMS_HOOK_TOKEN（URL 参数或 X-Hook-Token 头）；
-    未配置 token 时端点整体拒绝。验证失败静默处理，不泄露账号存在性。
+    - 鉴权：仅接受 X-Hook-Token 头（审计报告 P1-7：URL 参数会进访问日志）；
+    - 响应恒定：无论结果如何都返回 {"ok": true}，不泄露用户名/绑定状态；
+    - **不做自动重置**：短信无下行通道，临时密码无法送达用户。本端点只作为
+      "有人申请找回"的提醒通道，由管理员执行 forgot_reset 后**线下告知**用户
+      （审计报告 P0-1：短信发件人伪造无法在应用层验证，自动重置不安全）。
     """
     expect = os.environ.get("PWMGR_SMS_HOOK_TOKEN", "")
-    given = token or request.headers.get("x-hook-token", "")
+    given = request.headers.get("x-hook-token", "")
     if not expect or not hmac.compare_digest(given, expect):
         raise HTTPException(status_code=403, detail={"error": "forbidden"})
+    auth.rate_limit(f"sms:{_client_ip(request)}", 10, 60)
     m = _SMS_CODE_RE.match((req.text or "").strip())
-    if not m:
-        return {"handled": False, "reason": "bad_format"}
-    result = forgot.attempt_reset(m.group(1), "sms", req.mobile)
-    return {"handled": result == "ok", "reason": result}
+    if m:
+        username = m.group(1)
+        auth.rate_limit(f"smsuser:{username.lower()}", 3, 3600)
+        forgot.audit("SMS_REQUEST", user=username, channel="sms",
+                     sender=req.mobile,
+                     detail="admin action required: forgot_reset with sender mobile")
+        log.warning("找回申请(短信) user=%s —— 需管理员人工执行 forgot_reset", username)
+    return {"ok": True}
 
 
 @app.post("/register")
 def register(req: RegisterReq, request: Request):
     ip = _client_ip(request)
     auth.check_rate_limit(ip)
+    # 审计报告 P1-8：注册成功也跑 3 次 Argon2，必须按 IP 限制成功/尝试总量，
+    # 否则匿名攻击者可无限注册持续消耗 CPU/内存（失败锁定不含成功请求）。
+    auth.rate_limit(f"reg:{ip}",
+                    int(os.environ.get("PWMGR_REG_PER_HOUR", "10")), 3600)
     _validate_username(req.username)
     email = req.email.strip()
     phone = req.phone.strip()

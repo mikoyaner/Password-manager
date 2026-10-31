@@ -63,31 +63,37 @@ def _reset_password(username: str, new_pwd: str):
 
 
 def _forgot_reset(username: str, contact: str):
-    """忘记密码手动兜底：contact 为用户发来的邮件里的发件人邮箱/短信发件人手机号。"""
+    """忘记密码手动兜底：contact 为用户发来的邮件里的发件人邮箱/短信发件人手机号。
+
+    安全（审计报告 P0-1）：不再使用固定密码 86868686，改为**随机临时密码**，
+    只在本次输出中出现一次，请线下告知用户；用户登录后应立即修改。
+    """
     store.init_db()
-    kind = "email" if "@" in contact else "sms"
-    result = forgot.attempt_reset(username, kind, contact)
+    result, temp = forgot.manual_reset(username, contact)
     if result == "ok":
-        print(f"已重置：{username} 的用户密码现为初始密码 86868686，请提醒用户立即修改")
+        print(f"已重置：{username} 的临时密码为 {temp}\n"
+              f"（仅此一次输出，请线下告知用户；用户登录后应立即修改密码）")
     elif result == "no_user":
         print(f"未找到用户 {username}", file=sys.stderr); sys.exit(1)
     elif result == "mismatch":
         print("发件人联系方式与注册信息不匹配，未重置", file=sys.stderr); sys.exit(1)
-    elif result == "throttled":
-        print("该账号 24 小时内已重置过（无需重复操作）")
-    else:
-        print(f"失败: {result}", file=sys.stderr); sys.exit(1)
+    elif result == "invalid_contact":
+        print("联系方式无效", file=sys.stderr); sys.exit(1)
 
 
 def _set_contact(username: str, contact: str):
     """管理员重绑找回联系方式（contact 含 @ 视为邮箱，否则视为手机号）。"""
     import os as _os
+    import sqlite3 as _s
     store.init_db()
-    kind = "email" if "@" in contact else "sms"
     pepper = _os.environ.get("PWMGR_CONTACT_PEPPER", "")
+    kind = "email" if "@" in contact else "sms"
     try:
         store.set_contact_hash(username, kind, contact, pepper)
         print(f"已重绑 {username} 的找回{('邮箱' if kind == 'email' else '手机号')}")
+    except _s.IntegrityError:
+        print("该联系方式已被其他账号绑定（一个联系方式只绑一个账号）",
+              file=sys.stderr); sys.exit(1)
     except ValueError as e:
         print(f"失败: {e}", file=sys.stderr); sys.exit(1)
 

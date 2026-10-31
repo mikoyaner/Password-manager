@@ -100,6 +100,27 @@ def clear_failures(ip: str) -> None:
     _attempts.pop(ip, None)
 
 
+# 通用滑动窗口限流（审计报告 P1-8/P1-9）：按 key 计数，超限抛 429。
+_buckets: dict[str, list[float]] = {}
+
+
+def rate_limit(key: str, limit: int, window_s: int = 60) -> None:
+    """key 为任意字符串（如 'reg:1.2.3.4'）；窗口内达到 limit 即抛 429。
+
+    注意：与失败锁定不同，这里**成功请求也计数**——用于限制 Argon2 这类
+    高成本操作的总量（匿名可触达的端点都应配一条）。
+    """
+    now = time.time()
+    lst = [t for t in _buckets.get(key, []) if now - t < window_s]
+    if len(lst) >= limit:
+        raise HTTPException(status_code=429, detail={"error": "rate_limited"})
+    lst.append(now)
+    _buckets[key] = lst
+    if len(_buckets) > 4096:                     # 控制内存
+        for k in [k for k, v in _buckets.items() if not v]:
+            _buckets.pop(k, None)
+
+
 # ===== FastAPI Basic 认证依赖 =====
 
 def client_ip(req: Request) -> str:

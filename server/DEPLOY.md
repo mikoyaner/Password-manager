@@ -172,48 +172,47 @@ sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh delete_user <username>
 sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh reset_password <username> <new>
 ```
 
-## 7.5 忘记密码：管理员侧配置（v2.7）
+## 7.5 忘记密码：管理员侧配置（v2.8 两步确认）
 
-用户在客户端点「忘记密码」→ 输入用户名 → 按提示用**注册时的邮箱**发邮件
-「01用户名」到管理员邮箱，或用**注册时的手机号**发短信「01用户名d」。
-服务器验证**发件人联系方式哈希**（注册时明文即哈希存储，永不落明文）后，
-自动把该用户密码重置为 **86868686**。归一化/哈希实现见 `server/contacts.py`。
+**流程**（客户端「忘记密码」弹窗会展示给用户）：
+1. 用户用**注册时的邮箱**发送「01用户名」到管理员收件邮箱；
+2. 系统自动回复一封**确认码**邮件（8 位、15 分钟有效）；
+3. 用户**回复那封邮件**（或用同一邮箱再发一封），正文中包含确认码；
+4. 系统校验通过后，生成**随机临时密码**回复给用户；用户用它登录并立即改密。
 
-**配置步骤**（`/opt/pwmanager/server/admin.env`，root:pwmanager 0640，setup 脚本已生成模板）：
+安全设计（审计报告 P0-1）：不存在固定密码；确认码证明"能收信"，
+伪造发件人拿不到任何凭据；临时密码绝不写日志；24h 每账号限一次重置。
 
-```dotenv
-PWMGR_ADMIN_EMAIL=yourmailbox@qq.com     # 接收找回邮件 + 自动回复的发件人
-PWMGR_IMAP_HOST=imap.qq.com              # QQ 邮箱 IMAP
-PWMGR_IMAP_USER=yourmailbox@qq.com
-PWMGR_IMAP_PASS=<IMAP/SMTP 授权码，不是登录密码>
-PWMGR_SMTP_HOST=smtp.qq.com
-PWMGR_SMTP_PORT=465
-PWMGR_SMTP_USER=yourmailbox@qq.com
-PWMGR_SMTP_PASS=<同一授权码>
-PWMGR_SMS_HOOK_TOKEN=<setup 已自动生成>  # 短信上行回调的鉴权 token
-PWMGR_ADMIN_SMS_HINT=编辑短信「01用户名d」发送到 1069xxxxxxxx
+**配置**（部署时自动拆分为两个文件，root 权限）：
+- `/opt/pwmanager/api.env`（root:pwmanager 640）：管理员邮箱、短信提示、
+  `PWMGR_SMS_HOOK_TOKEN`、`PWMGR_CONTACT_PEPPER`（一次性设置后勿改，改了会使
+  查重列失效）；
+- `/opt/pwmanager/mail.env`（root:root 600）：IMAP/SMTP 服务器与**授权码**
+  （不是邮箱登录密码；QQ/126/189 需在网页设置开启 IMAP/SMTP 并生成授权码）。
+
+旧版 admin.env 会在重跑 setup 时自动拆分迁移并删除。
+
+**启用/验证**：
+```bash
+sudo systemctl restart pwmanager pwmanager-mail.timer
+curl -sk https://127.0.0.1:8443/contact      # 应返回管理员邮箱
+# 用任意邮箱发一封正文 01<测试用户名> 的邮件 → 约 1 分钟内收到确认码邮件
 ```
 
-1. 注册一个专用邮箱（推荐 QQ 邮箱）→ 网页设置 → 账户 → 开启 IMAP/SMTP 服务 → 生成**授权码**
-2. 填入 admin.env → `sudo systemctl restart pwmanager && sudo systemctl restart pwmanager-mail.timer`
-3. 验证收信链路：用任意邮箱发一封正文为 `01<某测试用户名>` 的邮件 → 约 1 分钟内收到自动回复
-4. 客户端「忘记密码」弹窗的内容来自 `GET /contact`（即 admin_email 与 ADMIN_SMS_HINT）
-
-**手动兜底**（邮件/短信自动化都不可用时）：
-
+**手动兜底**（自动流程不可用时，生成随机临时密码打印一次）：
 ```bash
 sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh forgot_reset <用户名> <发件人邮箱或手机号>
+# 重新绑定用户的找回联系方式（含 @ 为邮箱，否则为手机号）：
+sudo -u pwmanager /opt/pwmanager/bin/manage-as-service.sh set_contact <用户名> <新邮箱或手机号>
 ```
 
-**短信自动化（二期，待实测）**：在云短信服务商开通**上行短信**并配置回调 URL：
-`https://<服务器地址>:8443/internal/sms-up?token=<PWMGR_SMS_HOOK_TOKEN>`。
-⚠️ 先实测「用户直接发短信到 SP 端口」能否触发回调——若厂商要求"回复平台下发的短信"，
-则下发需要明文手机号，与哈希存储冲突，短信侧请保持手动兜底。重置后不回短信，
-用户重试登录 86868686 即确认生效（24 小时内每账号仅重置一次）。
-
-**安全边界**：重置 = 证明"发件人是注册邮箱/手机的主人"后的账号接管（本意如此）；
-本地密码库不受影响（云端库为密文，需密码库密码才能解密）。86868686 为过渡密码，
-客户端登录时会弹窗提醒立即修改。
+**注意事项**：
+- worker 只处理**未读**且**60 分钟内**的邮件——用户发送后不要打开/移动它；
+- /contact 有匿名限流；建议把管理员邮箱配置为**专用别名邮箱**，避免暴露个人邮箱；
+- 短信通道无下行能力：短信仅作为提醒管理员的信号（日志/审计可见），临时密码
+  需管理员线下告知用户；
+- pwdeploy 的 sudoers 已收紧（无 daemon-reload/install），unit 更新由 root 重跑
+  本脚本完成。
 
 ## 8. 证书指纹
 
