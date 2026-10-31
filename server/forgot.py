@@ -171,7 +171,10 @@ def _sender_h(kind: str, sender: str) -> str:
         v = contacts.normalize_email(sender)
     else:
         v = contacts.normalize_phone(sender)
-    return hmac.new(b"pwdmgr-pending", f"{kind}:{v}".encode("utf-8"),
+    pepper = os.environ.get("PWMGR_CONTACT_PEPPER", "")
+    if not pepper:
+        raise ValueError("PWMGR_CONTACT_PEPPER 未配置：确认码发件人哈希拒绝计算")
+    return hmac.new(pepper.encode("utf-8"), f"{kind}:{v}".encode("utf-8"),
                     hashlib.sha256).hexdigest()
 
 
@@ -189,7 +192,7 @@ def write_json_atomic(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
-def _load_pending() -> dict:
+def _load_pending_nolock() -> dict:
     try:
         with open(_pending_path(), encoding="utf-8") as f:
             return json.load(f)
@@ -197,34 +200,50 @@ def _load_pending() -> dict:
         return {}
 
 
-def _save_pending(d: dict) -> None:
-    """原子写：tmp + fsync + rename（审计报告 C6）。"""
+def _write_pending_nolock(d: dict) -> None:
+    """原子写：tmp + fsync + rename（审计报告 C6）。调用方需已持 _file_lock。"""
     path = _pending_path()
     tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        log.exception("pending save failed")
+        with contextlib.suppress(Exception):
+            os.remove(tmp)
+
+
+def read_pending() -> dict:
+    """读取待确认状态（持跨进程文件锁，审计报告 A8）。"""
     with _file_lock():
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False, indent=1)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        except Exception:
-            log.exception("pending save failed")
-            with contextlib.suppress(Exception):
-                os.remove(tmp)
+        return _load_pending_nolock()
+
+
+def mutate_pending(fn) -> None:
+    """load→modify→save 整段持同一把跨进程文件锁（审计报告 A8）。
+
+    fn(d) 返回修改后的 dict；返回 None 表示不做修改。
+    """
+    with _file_lock():
+        d = _load_pending_nolock()
+        d2 = fn(d)
+        if d2 is not None:
+            _write_pending_nolock(d2)
 
 
 def _drop_pending_for_user(username: str) -> None:
-    d = _load_pending()
-    kept = {t: v for t, v in d.items()
-            if v.get("user", "").lower() != username.lower()}
-    _save_pending(kept)
+    """作废某用户的全部待确认码（用户名**精确匹配**，审计报告 A4）。"""
+    mutate_pending(lambda d: {t: v for t, v in d.items()
+                              if v.get("user") != username})
 
 
 def _resend_allowed(username: str) -> bool:
     """重发频率限制：每用户每小时最多 3 次（审计报告 P1-8 的 DoS 口）。"""
     path = os.path.join(_data_dir(), "forgot_resend.state")
-    key = username.lower()
+    key = username
     now_ms = int(time.time() * 1000)
     with _file_lock():
         try:
@@ -316,15 +335,19 @@ def begin_reset(username: str, kind: str, contact: str) -> tuple[str, dict]:
         return "ok", {"action": "deliver_temp", "temp": temp, "commit": commit}
 
     token = gen_token()
-    pending = _load_pending()
+    sender_h = _sender_h(kind, contact)
     now = time.time()
-    pending = {t: v for t, v in pending.items() if v.get("exp", 0) > now}
-    # 同一用户只保留最新确认码（审计报告 P1-6：旧码随新码签发作废）
-    pending = {t: v for t, v in pending.items()
-               if v.get("user", "").lower() != username.lower()}
-    pending[token] = {"user": username, "kind": kind,
-                      "sender_h": _sender_h(kind, contact), "exp": now + _TOKEN_TTL_S}
-    _save_pending(pending)
+
+    def _issue(d: dict) -> dict:
+        # 过滤过期项 + 清除同用户旧确认码（审计报告 P1-6：旧码随新码签发作废；
+        # 用户名精确匹配，审计报告 A4）
+        d = {t: v for t, v in d.items()
+             if v.get("exp", 0) > now and v.get("user") != username}
+        d[token] = {"user": username, "kind": kind,
+                    "sender_h": sender_h, "exp": now + _TOKEN_TTL_S}
+        return d
+
+    mutate_pending(_issue)
     audit("TOKEN_SENT", user=username, channel=kind, sender=contact,
           detail="confirmation code issued, expires in 15min")
     return "ok", {"action": "deliver_token", "token": token}
@@ -339,7 +362,7 @@ def confirm_by_token(token: str, sender: str) -> tuple[str, dict]:
     """
     token = (token or "").strip().upper()
     sender_n = (sender or "").strip()
-    pending = _load_pending()
+    pending = read_pending()
     entry = pending.get(token)
     if entry is None or entry.get("exp", 0) < time.time():
         if entry is not None:
@@ -395,22 +418,6 @@ def commit_reset(payload: dict) -> bool:
     else:
         log.warning("forgot: commit raced with user password change, skipped")
     return ok
-
-
-def rollback_reset(payload: dict) -> None:
-    """投递失败：回滚到旧密码哈希（CAS：用户若在期间自行改密则不覆盖）。"""
-    c = payload["commit"]
-    with store._lock, store._connect() as conn:
-        cur = conn.execute(
-            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ? "
-            "WHERE username = ? COLLATE NOCASE AND service_pwd_hash = ?",
-            (bytes.fromhex(c["old_hash"]), bytes.fromhex(c["old_salt"]),
-             c["user"], bytes.fromhex(c["old_hash"])),
-        )
-        if cur.rowcount == 0:
-            log.info("forgot rollback: password already changed elsewhere, kept")
-    audit("SEND_FAILED", user=c["user"], channel="email",
-          detail="delivery failed, rolled back, confirmation retained")
 
 
 def manual_reset(username: str, contact: str) -> tuple[str, str]:

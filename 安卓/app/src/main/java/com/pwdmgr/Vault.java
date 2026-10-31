@@ -28,11 +28,15 @@ public class Vault {
     public long modifiedAt = 0;
     /** 展示标签 ≤30。 */
     public String label = null;
-    /** 本地内容修改计数（不入编、不同步）：推送前后比对，判断期间是否又改过。 */
-    public long dirtySeq = 0;
+    /** 本地内容修改计数（不入编、不同步）：推送前后比对，判断期间是否又改过。
+     *  volatile：后台推送线程读取时保证可见性（审计报告 B4）。 */
+    public volatile long dirtySeq = 0;
 
     /** id -> record JSONObject */
     public final JSONObject records = new JSONObject();
+
+    /** Vault 级锁：records 的所有读写与 toJson/activeRecords 都在此锁内（B4）。 */
+    public final Object vaultLock = new Object();
 
     public Vault() {}
 
@@ -41,7 +45,7 @@ public class Vault {
     public static String newId() { return UUID.randomUUID().toString(); }
 
     // ---- 序列化 ----
-    public byte[] toJson() throws JSONException {
+    public synchronized byte[] toJson() throws JSONException {
         JSONObject root = new JSONObject();
         root.put("username", username);
         root.put("pwd_time", pwdTime);
@@ -75,7 +79,7 @@ public class Vault {
     }
 
     /** 未删除记录，附带 id 字段，按 title 排序。 */
-    public List<JSONObject> activeRecords() throws JSONException {
+    public synchronized List<JSONObject> activeRecords() throws JSONException {
         List<JSONObject> out = new ArrayList<>();
         Iterator<String> it = records.keys();
         while (it.hasNext()) {
@@ -93,7 +97,7 @@ public class Vault {
         return out;
     }
 
-    public List<JSONObject> search(String keyword) throws JSONException {
+    public synchronized List<JSONObject> search(String keyword) throws JSONException {
         List<JSONObject> all = activeRecords();
         if (keyword == null || keyword.trim().isEmpty()) return all;
         String kw = keyword.trim().toLowerCase();
@@ -106,12 +110,12 @@ public class Vault {
         return out;
     }
 
-    public JSONObject get(String id) {
+    public synchronized JSONObject get(String id) {
         return records.optJSONObject(id);
     }
 
     // ---- 增删改 ----
-    public String add(String type, String title, String url, String username,
+    public synchronized String add(String type, String title, String url, String username,
                       String password, String apikey, String note) throws JSONException {
         String id = newId();
         JSONObject rec = new JSONObject();
@@ -129,7 +133,7 @@ public class Vault {
         return id;
     }
 
-    public void update(String id, String type, String title, String url, String username,
+    public synchronized void update(String id, String type, String title, String url, String username,
                        String password, String apikey, String note) throws JSONException {
         JSONObject rec = records.getJSONObject(id);
         rec.put("type", type);
@@ -145,7 +149,7 @@ public class Vault {
     }
 
     /** 软删除（墓碑）。 */
-    public void delete(String id) throws JSONException {
+    public synchronized void delete(String id) throws JSONException {
         JSONObject rec = records.optJSONObject(id);
         if (rec == null) return;
         rec.put("deleted", true);
@@ -156,6 +160,6 @@ public class Vault {
     /** 修改本地 modified_at。真值以服务器 upload_time 为准；本地用于展示。 */
     public void touch() {
         this.modifiedAt = nowTs();
-        this.dirtySeq++;
+        this.dirtySeq = this.dirtySeq + 1;   // 仅 UI 线程自增；volatile 保证后台可见
     }
 }

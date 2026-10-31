@@ -358,10 +358,11 @@ def set_contact_hash(username: str, kind: str, value: str,
 
 
 def update_service_pwd(username: str, new_hash: bytes, new_salt: bytes) -> None:
+    """管理员改密（审计报告 A7）：同时清除 24h 重置标记，重新起算。"""
     with _lock, _connect() as conn:
         conn.execute(
-            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ? "
-            "WHERE username = ?",
+            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
+            "last_forgot_at = NULL WHERE username = ?",
             (new_hash, new_salt, username),
         )
 

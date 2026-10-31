@@ -13,6 +13,7 @@ import tempfile
 _tmp = tempfile.mkdtemp()
 os.environ["PWMGR_DB"] = os.path.join(_tmp, "test.db")
 os.environ["PWMGR_REG_PER_HOUR"] = "1000"  # 测试环境放开注册限流
+os.environ["PWMGR_CONTACT_PEPPER"] = "test-pepper"  # 找回哈希测试用
 
 from fastapi.testclient import TestClient  # noqa: E402
 

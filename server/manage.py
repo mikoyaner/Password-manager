@@ -59,6 +59,8 @@ def _reset_password(username: str, new_pwd: str):
     salt = auth.new_salt()
     verifier = auth.derive_verifier(new_pwd, salt)
     store.update_service_pwd(username, verifier, salt)
+    # 审计报告 A7：管理员改密后作废该用户全部待确认码
+    forgot._drop_pending_for_user(username)
     print(f"reset ok for: {username}")
 
 

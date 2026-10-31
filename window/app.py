@@ -1728,6 +1728,14 @@ def main():
     storage.migrate_appdata_to_portable()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
+    # 审计报告 C1：单实例锁——两个进程写同一个 vault.enc 会互相覆盖/损坏
+    from PyQt6.QtNetwork import QLockFile
+    import tempfile as _tf
+    _single = QLockFile(os.path.join(_tf.gettempdir(), "PwdMgr.single.lock"))
+    if not _single.tryLock(100):
+        QMessageBox.warning(None, "已在运行",
+                            "密码管理器已经在运行（托盘或另一窗口）。")
+        return 0
     if missing:
         QMessageBox.warning(None, "缺少依赖",
                              f"未安装：{', '.join(missing)}。凭据记忆功能不可用。")

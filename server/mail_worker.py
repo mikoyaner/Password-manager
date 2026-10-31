@@ -10,13 +10,14 @@
   - 其他无关邮件：**保持未读、不改动**（Message-ID 记入状态文件防重复扫描）。
 
 投递安全（审计报告 P0-2）：临时密码邮件**发送成功后才写数据库**；
-SMTP 失败自动回滚旧密码并保留确认码，用户不会被锁在门外。
+SMTP 失败自动回滚（CAS 保留用户可能已自行设置的新密码）、确认码保留、
+邮件保持未读下轮自动重试；同一封连续失败 3 轮后放弃并审计 DELIVER_GIVEUP。
 
 配置全部来自环境变量（systemd EnvironmentFile=mail.env 注入）：
   PWMGR_IMAP_HOST / PWMGR_IMAP_USER / PWMGR_IMAP_PASS
   PWMGR_SMTP_HOST / PWMGR_SMTP_PORT / PWMGR_SMTP_USER / PWMGR_SMTP_PASS
-  PWMGR_ADMIN_EMAIL（可选，回复发件人默认用 SMTP_USER）
-未配置 SMTP 时整轮跳过处理并明确告警（找回无法投递，处理无意义）。
+未配置 SMTP 时整轮跳过处理并明确告警（找回无法投递，处理无意义）；
+PWMGR_CONTACT_PEPPER 缺失时同样拒绝处理（确认码发件人哈希无法安全计算）。
 
 安全：临时密码只回复给"通过哈希验证的发件邮箱"，伪造 From 的邮件即使被处理，
 确认码/临时密码也只会发往真正的邮箱主人；验证失败静默丢弃；临时密码绝不写日志。
@@ -27,7 +28,6 @@ from __future__ import annotations
 import hashlib
 import html as _html
 import imaplib
-import json
 import logging
 import os
 import re
@@ -54,24 +54,28 @@ _CODE_RE = re.compile(r"01\s*([a-zA-Z0-9._-]{3,20})(?![a-zA-Z0-9._-])")
 _FRESH_SECONDS = 60 * 60
 _HTML_TAG = re.compile(r"<[^>]+>")
 _MAX_PROCESSED_PER_RUN = 10   # 每轮最多处理的找回邮件数（Argon2 放大防护，P1-8）
-_SCAN_STATE_MAX = 500         # 无关邮件 Message-ID 去重状态上限
+_SCAN_STATE_MAX = 500         # 状态文件上限（seen_ids + 重试计数）
+_RETRY_GIVEUP_ROUNDS = 3      # 同一封邮件连续投递失败 3 轮后放弃（A1）
 
 
-def _scan_state_path() -> str:
+def _state_path() -> str:
     return forgot._audit_path() + ".scan.json"
 
 
-def _load_scan_state() -> set:
+def _load_state() -> tuple[set, dict]:
     try:
-        with open(_scan_state_path(), encoding="utf-8") as f:
-            return set(json.load(f).get("seen_ids", []))
+        with open(_state_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return set(d.get("seen_ids", [])), dict(d.get("retries", {}))
     except Exception:
-        return set()
+        return set(), {}
 
 
-def _save_scan_state(ids: set) -> None:
-    forgot.write_json_atomic(_scan_state_path(),
-                             {"seen_ids": sorted(ids)[-_SCAN_STATE_MAX:]})
+def _save_state(seen_ids: set, retries: dict) -> None:
+    forgot.write_json_atomic(_state_path(), {
+        "seen_ids": sorted(seen_ids)[-_SCAN_STATE_MAX:],
+        "retries": {k: v for k, v in list(retries.items())[-_SCAN_STATE_MAX:]},
+    })
 
 
 def _mail_id(msg, raw: bytes) -> str:
@@ -126,10 +130,10 @@ def _extract_code(text: str) -> str | None:
 
 def _find_pending_token(text: str, sender: str) -> str | None:
     """正文/主题里是否包含该发件人名下的待确认码。"""
-    pending = forgot._load_pending()
+    pending = forgot.read_pending()
     for token, entry in pending.items():
-        if entry.get("sender_h") != forgot.sender_hash_for(entry.get("kind", "email"),
-                                                           sender):
+        if entry.get("sender_h") != forgot.sender_hash_for(
+                entry.get("kind", "email"), sender):
             continue
         if entry.get("exp", 0) < time.time():
             continue
@@ -179,25 +183,22 @@ def _smtp_send(to_addr: str, subject: str, body: str) -> None:
 
 
 def _smtp_send_retry(to_addr: str, subject: str, body: str, attempts: int = 2) -> bool:
-    """发送（带一次重试）。全部失败返回 False——调用方据此回滚、保留确认码。"""
-    last_exc: Exception | None = None
+    """发送（带一次重试）。全部失败返回 False——调用方据此转入待重试。"""
     for i in range(attempts):
         try:
             _smtp_send(to_addr, subject, body)
             return True
         except Exception:
-            last_exc = None
             log.exception("smtp send failed (attempt %d/%d)", i + 1, attempts)
-    if last_exc is not None:
-        log.error("smtp send failed permanently")
     return False
 
 
-def _process_message(msg, raw: bytes) -> str:
-    """处理一封未读邮件，返回 'code' / 'token' / 'skip'。
+def _process_message(msg, raw: bytes) -> tuple[str, str]:
+    """处理一封未读邮件，返回 (类别, 发件人)。
 
-    'code'   = 带找回码/确认码的邮件（应答后标已读）
-    'skip'   = 无关邮件（保持未读，仅记录扫描状态）
+    'handled'    = 终态（投递成功 / 按规格丢弃）→ 标已读
+    'retry'      = 投递暂时失败 → 保持未读、不进去重状态，下一轮重试
+    'unrelated'  = 无关邮件 → 保持未读，仅记入去重状态
     """
     sender = parseaddr(str(msg.get("From", "")))[1]
     text = _message_text(msg)
@@ -206,73 +207,87 @@ def _process_message(msg, raw: bytes) -> str:
         log.info("mail older than %ds: discarded", _FRESH_SECONDS)
         forgot.audit("FRESH_SKIP", user="-", channel="email", sender=sender,
                      detail="mail older than 60min, discarded")
-        return "skip"
+        return "handled", sender
 
     if sender:
         token = _find_pending_token(text, sender)
         if token:
             result, payload = forgot.confirm_by_token(token, sender)
             if result == "ok":
-                sent = _smtp_send_retry(sender, "您的临时密码",
-                                        f"临时密码：{payload['temp']}\n\n"
-                                        "请立即用它登录，并马上在客户端『修改用户密码』中"
-                                        "设置你自己的新密码。\n（本邮件由系统自动发送）")
+                sent = _smtp_send_retry(
+                    sender, "您的临时密码",
+                    f"临时密码：{payload['temp']}\n\n"
+                    "请立即用它登录，并马上在客户端『修改用户密码』中"
+                    "设置你自己的新密码。\n（本邮件由系统自动发送）")
                 if sent:
                     forgot.commit_reset(payload)
+                    forgot.audit("RESET_DELIVERED", user=payload["user"],
+                                 channel="email", sender=sender,
+                                 detail="temp password emailed and committed")
                     log.info("two-step reset completed")
-                else:
-                    # 发送失败：回滚旧密码、保留确认码，下一轮用户重试可再次处理
-                    forgot.rollback_reset(payload)
-                    log.warning("temp delivery failed: rolled back, token retained")
-                return "token"
+                    return "handled", sender
+                log.warning("temp delivery failed: token retained, will retry")
+                forgot.audit("DELIVER_FAILED", user=payload["user"],
+                             channel="email", sender=sender,
+                             detail="temp mail delivery failed, token retained, will retry")
+                return "retry", sender
+            # invalid_token：确认码过期/未知/发件人不符——终态，标已读
             log.info("token confirm failed: %s", result)
-            return "skip"
+            return "handled", sender
 
     code = _extract_code(text)
     if not code or not sender:
         log.info("mail without code/token: left unread")
-        return "skip"
+        return "unrelated", sender
 
     result, payload = forgot.begin_reset(code, "email", sender)
     if result == "ok":
         action = payload["action"]
         if action == "deliver_token":
-            sent = _smtp_send_retry(sender, "密码重置确认码",
-                                    f"验证码：{payload['token']}\n\n"
-                                    f"有效期 15 分钟。\n\n"
-                                    "操作步骤：**复制上面的验证码，新建一封空白邮件**"
-                                    "（收件人填写本邮箱地址），把验证码粘贴到正文后发送。"
-                                    "系统确认后会把随机临时密码发送到本邮箱。\n"
-                                    "注意：请勿直接回复本邮件。")
+            sent = _smtp_send_retry(
+                sender, "密码重置确认码",
+                f"验证码：{payload['token']}\n\n"
+                f"有效期 15 分钟。\n\n"
+                "操作步骤：**复制上面的验证码，新建一封空白邮件**（收件人填写本邮箱地址），"
+                "把验证码粘贴到正文后发送。系统确认后会把随机临时密码发送到本邮箱。\n"
+                "注意：请勿直接回复本邮件。")
             if sent:
                 log.info("confirmation code issued")
-            else:
-                # 确认码没发出去：pending 保留，邮件保持未读，下一轮自动重试
-                log.warning("token mail delivery failed: mail left unread for retry")
-                return "skip"
-            return "code"
+                forgot.audit("TOKEN_DELIVERED", user=code, channel="email",
+                             sender=sender, detail="confirmation code emailed")
+                return "handled", sender
+            log.warning("token mail delivery failed: mail left unread for retry")
+            forgot.audit("DELIVER_FAILED", user=code, channel="email",
+                         sender=sender,
+                         detail="confirmation mail delivery failed, will retry")
+            return "retry", sender
         if action == "deliver_temp":
-            sent = _smtp_send_retry(sender, "您的临时密码",
-                                    f"临时密码：{payload['temp']}\n\n"
-                                    "请立即用它登录，并马上在客户端『修改用户密码』中"
-                                    "设置你自己的新密码。\n（本邮件由系统自动发送）")
+            sent = _smtp_send_retry(
+                sender, "您的临时密码",
+                f"临时密码：{payload['temp']}\n\n"
+                "请立即用它登录，并马上在客户端『修改用户密码』中"
+                "设置你自己的新密码。如非本人操作，请立即检查邮箱安全。\n"
+                "（本邮件由系统自动发送）")
             if sent:
                 forgot.commit_reset(payload)
+                forgot.audit("RESET_DELIVERED", user=code, channel="email",
+                             sender=sender,
+                             detail="temp password emailed and committed (24h resend)")
                 log.info("24h direct temp delivered and committed")
             else:
-                forgot.rollback_reset(payload)
-                forgot.audit("SEND_FAILED", user=code, channel="email",
+                log.warning("temp delivery failed: mail left unread for retry")
+                forgot.audit("DELIVER_FAILED", user=code, channel="email",
                              sender=sender,
-                             detail="temp delivery failed, rolled back, mail left unread")
-                log.warning("temp delivery failed: rolled back, mail left unread")
-            return "code"
-        # resend_limited：不投递、不改密（审计报告 P1-8 的 DoS 防护）
+                             detail="temp mail delivery failed, will retry")
+                return "retry", sender
+            return "handled", sender
+        # resend_limited：不投递、不改密（P1-8 防护）
         log.info("resend rate limited: discarded")
         forgot.audit("RESEND_LIMITED", user=code, channel="email", sender=sender)
-        return "code"
+        return "handled", sender
     # mismatch / no_user / invalid_contact：按用户规格丢弃 + 标已读
     log.info("reset request rejected: %s", result)
-    return "code"
+    return "handled", sender
 
 
 def main() -> int:
@@ -291,8 +306,13 @@ def main() -> int:
         log.warning("SMTP 未配置（mail.env 缺 PWMGR_SMTP_*）："
                     "找回邮件无法投递，本轮跳过处理")
         return 0
+    if not os.environ.get("PWMGR_CONTACT_PEPPER"):
+        # 审计报告 A5：确认码发件人哈希需要 pepper，缺失时拒绝该功能而不是降级
+        log.warning("PWMGR_CONTACT_PEPPER 未配置（api.env）："
+                    "确认码发件人哈希无法安全计算，本轮跳过处理")
+        return 0
 
-    seen_ids = _load_scan_state()
+    seen_ids, retries = _load_state()
     imap = imaplib.IMAP4_SSL(imap_host)
     try:
         imap.login(imap_user, imap_pass)
@@ -325,21 +345,36 @@ def main() -> int:
             msg = BytesParser(policy=policy.default).parsebytes(raw)
             mid = _mail_id(msg, raw)
             if mid in seen_ids:
-                continue   # 已扫描过的无关邮件：跳过（仍保持未读，P1-5 修复）
+                continue   # 已扫描过（终态或放弃）：跳过，仍保持未读
             try:
-                kind = _process_message(msg, raw)
+                kind, sender = _process_message(msg, raw)
             except Exception:
                 log.exception("failed to process one mail")
-                kind = "skip"
-            if kind in ("code", "token"):
-                # 用户指定：只有找回相关的邮件才标已读
+                kind, sender = "retry", ""
+            if kind == "retry":
+                n = retries.get(mid, 0) + 1
+                retries[mid] = n
+                if n >= _RETRY_GIVEUP_ROUNDS:
+                    # 连续 3 轮投递失败：放弃（保持未读、进入去重状态，不再重试）
+                    imap.store(num, "+FLAGS", "\\Seen")
+                    seen_ids.add(mid)
+                    retries.pop(mid, None)
+                    forgot.audit("DELIVER_GIVEUP", channel="email", sender=sender,
+                                 detail=f"delivery failed {n} consecutive rounds, giving up")
+                _save_state(seen_ids, retries)
+                continue
+            if kind == "handled":
                 imap.store(num, "+FLAGS", "\\Seen")
+                seen_ids.add(mid)
+                retries.pop(mid, None)
                 processed += 1
                 if processed >= _MAX_PROCESSED_PER_RUN:
                     log.info("per-run processing cap reached (%d)", processed)
                     break
-            seen_ids.add(mid)
-        _save_scan_state(seen_ids)
+            else:   # unrelated：保持未读，仅记入去重状态
+                seen_ids.add(mid)
+                retries.pop(mid, None)
+            _save_state(seen_ids, retries)
         return 0
     finally:
         try:

@@ -81,33 +81,6 @@ def verify(pwd: str, salt: bytes, expected: bytes) -> bool:
 
 
 # ===== 限流 =====
-
-def _prune(ip: str) -> list[float]:
-    now = time.time()
-    lst = [t for t in _attempts.get(ip, []) if now - t < _ATTEMPT_LOCK_SEC]
-    _attempts[ip] = lst
-    return lst
-
-
-def check_rate_limit(ip: str) -> None:
-    """超阈值抛 429。"""
-    lst = _prune(ip)
-    if len(lst) >= _ATTEMPT_MAX:
-        raise HTTPException(status_code=429, detail={"error": "rate_limited"})
-
-
-def record_failure(ip: str) -> None:
-    now = time.time()
-    _attempts.setdefault(ip, []).append(now)
-    # 控制内存：条目过多时清掉已经自然解锁、长期没有新失败的 IP
-    if len(_attempts) > 512:
-        stale = [k for k, v in _attempts.items()
-                 if not v or now - v[-1] > _ATTEMPT_LOCK_SEC]
-        for k in stale:
-            _attempts.pop(k, None)
-
-
-# ===== 限流 =====
 # 审计报告 C1：_attempts/_buckets 会被 FastAPI 线程池并发读写，全部持锁。
 
 _limiter_lock = threading.Lock()

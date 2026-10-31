@@ -299,17 +299,31 @@ public class MainActivity extends AppCompatActivity {
         // 一次性捕获，防止中途切库导致把 meta/密文写到别的 vid
         final String vid0 = vid();
         final Vault v0 = vault();
-        final byte[] key = VaultHolder.get().getKey();
+        final byte[] key = VaultHolder.get().getKey();   // B2：副本，clearAll 不影响
         final byte[] salt = VaultHolder.get().getSalt();
         if (vid0 == null || v0 == null) { toast("请先在首页打开一个库"); return; }
+        // 审计报告 A4/A5：UI 线程一次性完成序列化+加密快照；后台零共享可变状态
+        final byte[] blob;
+        final long pwdTime = v0.pwdTime;
+        final String label = v0.label;
+        final long modifiedAt = v0.modifiedAt;
+        final int recCount;
+        final long seq0 = v0.dirtySeq;   // 快门号：上传期间又改过就不盖章
+        try {
+            blob = Crypto.encryptVault(v0.toJson(), key, salt);
+            recCount = v0.activeRecords().size();
+        } catch (Exception e) {
+            toast("序列化失败: " + e.getMessage());
+            return;
+        }
         status.setText("推送中…");
         new Thread(() -> {
             try {
-                storage.saveVault(vid0, v0, key, salt, true); // 先落盘，成功后清标记
-                final long seq0 = v0.dirtySeq;                // 快门号：上传期间又改过就不盖章
-                byte[] bytes = storage.readVaultBytes(vid0);
+                // 后台只写快照字节与 meta，不触碰共享 Vault 对象
+                storage.saveVaultSnapshot(vid0, blob, pwdTime, modifiedAt,
+                                          label, recCount, true);
                 SyncClient c = newClient(account, servicePwd);
-                JSONObject resp = c.putVault(v0.pwdTime, v0.label, bytes);
+                JSONObject resp = c.putVault(pwdTime, label, blob);
                 int cloudVid = resp.optInt("vid");
                 long uploadTime = resp.optLong("upload_time");
                 int kept = resp.optInt("kept");

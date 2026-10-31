@@ -32,6 +32,10 @@ import java.util.Locale;
  */
 public class PwdMgrAutofillService extends AutofillService {
 
+    /** 审计报告 B5：单线程 executor 串行执行落库（避免并发保存/ANR）。 */
+    private final java.util.concurrent.ExecutorService saveExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+
     @Override
     public void onFillRequest(FillRequest request, CancellationSignal cancel, FillCallback callback) {
         List<FillContext> ctxs = request.getFillContexts();
@@ -121,22 +125,35 @@ public class PwdMgrAutofillService extends AutofillService {
         String url = TextUtils.isEmpty(pf.webDomain) ? "" : "https://" + pf.webDomain;
         String title = !TextUtils.isEmpty(pf.webDomain) ? pf.webDomain : pkg;
         String user = pf.usernameValue == null ? "" : pf.usernameValue;
-        try {
-            Vault v = h.getVault();
-            if (!hasSameLogin(v, url, user, pass)) {
-                v.add(Vault.TYPE_LOGIN, title,
-                        url.isEmpty() ? null : url,
-                        user.isEmpty() ? null : user,
-                        pass, null, "自动捕获");
+        // 审计报告 B5：落库放到单线程 executor（避免服务主线程 AES-GCM+全库重写
+        // 造成 ANR），回调在落库**之后**诚实返回，不做"先成功后失败"
+        final String fTitle = title;
+        final String fUrl = url;
+        final String fUser = user;
+        final String fPass = pass;
+        saveExecutor.execute(() -> {
+            try {
+                Vault v = h.getVault();
+                if (v == null) {   // 排队期间会话可能被清
+                    callback.onFailure("密码管理器未解锁");
+                    return;
+                }
                 Storage storage = new Storage(this);
+                synchronized (v.vaultLock) {
+                    if (!hasSameLogin(v, fUrl, fUser, fPass)) {
+                        v.add(Vault.TYPE_LOGIN, fTitle,
+                                fUrl.isEmpty() ? null : fUrl,
+                                fUser.isEmpty() ? null : fUser,
+                                fPass, null, "自动捕获");
+                    }
+                }
                 storage.saveVault(h.getVid(), v, h.getKey(), h.getSalt(), true);
-                storage.logSync(h.getVid(), "自动捕获保存 " + title + " / " + user);
+                storage.logSync(h.getVid(), "自动捕获保存 " + fTitle + " / " + fUser);
+                callback.onSuccess();
+            } catch (Exception e) {
+                callback.onFailure("保存失败: " + e.getMessage());
             }
-            // 系统已通过保存提示征得用户同意，这里直接入库，不再二次弹窗
-            callback.onSuccess();
-        } catch (Exception e) {
-            callback.onFailure("保存失败: " + e.getMessage());
-        }
+        });
     }
 
     /** 同 URL + 同用户名 + 同密码视为重复，避免每次登录都新增一条。 */

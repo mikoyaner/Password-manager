@@ -236,6 +236,26 @@ public class Storage {
         saveMeta(vid, meta);
     }
 
+    /**
+     * 审计报告 A4/A5：保存一份**已在 UI 线程序列化并加密**的库快照。
+     * 后台线程只写文件与 meta，不触碰共享 Vault 对象（零并发序列化风险）。
+     * pwdTime/modifiedAt/label/recordCount 由调用方在 UI 线程捕获后传入。
+     */
+    public void saveVaultSnapshot(String vid, byte[] encryptedBlob, long pwdTime,
+                                  long modifiedAt, String label, int recordCount,
+                                  boolean neverUploaded) throws Exception {
+        writeAtomic(vaultFile(vid), encryptedBlob);
+        JSONObject meta = loadMeta(vid);
+        meta.put("vid", vid);
+        meta.put("pwd_time", pwdTime);
+        meta.put("modified_at", modifiedAt);
+        meta.put("label", label == null ? JSONObject.NULL : label);
+        meta.put("record_count", recordCount);
+        meta.put("never_uploaded", neverUploaded);
+        if (!meta.has("created_at")) meta.put("created_at", System.currentTimeMillis());
+        writeAtomic(metaFile(vid), meta.toString(2).getBytes(StandardCharsets.UTF_8));
+    }
+
     /** 读某库当前落盘的完整 vault.enc 字节（含 49B 头），用于推送。 */
     public byte[] readVaultBytes(String vid) throws IOException {
         return Files.readAllBytes(vaultFile(vid, false).toPath());
@@ -278,34 +298,45 @@ public class Storage {
     }
 
     /** 原子写：临时文件 + sync + rename。 */
+    /** 审计报告 B3：全进程共享一把 IO 锁，串行化 vault.enc/meta 的原子写。 */
+    private static final Object VAULT_IO_LOCK = new Object();
+
     private static void writeAtomic(File target, byte[] data) throws IOException {
         File parent = target.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
-        File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
-        try (FileOutputStream fos = new FileOutputStream(tmp)) {
-            fos.write(data);
-            fos.getFD().sync();
-        }
-        if (!tmp.renameTo(target)) {
-            try (FileOutputStream fos = new FileOutputStream(target)) {
+        // 审计报告 B3：tmp 名唯一（线程 id + 纳秒），并发保存不再互相踩踏
+        File tmp = new File(target.getParentFile(),
+                target.getName() + ".tmp." + Thread.currentThread().getId()
+                        + "-" + System.nanoTime());
+        synchronized (VAULT_IO_LOCK) {
+            try (FileOutputStream fos = new FileOutputStream(tmp)) {
                 fos.write(data);
                 fos.getFD().sync();
             }
-            //noinspection ResultOfMethodCallIgnored
-            tmp.delete();
+            if (!tmp.renameTo(target)) {
+                // 同卷 rename 失败（极罕见）：退化为直接写目标（仍在锁内，串行安全）
+                try (FileOutputStream fos = new FileOutputStream(target)) {
+                    fos.write(data);
+                    fos.getFD().sync();
+                }
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
         }
     }
 
     // ---- 同步日志（禁止记录明文密码/主密钥/密文内容）----
     public void logSync(String vid, String line) {
-        try {
-            File f = logFile(vid);
-            String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
-            String entry = stamp + "  " + line + "\n";
-            try (FileOutputStream fos = new FileOutputStream(f, true)) {
-                fos.write(entry.getBytes(StandardCharsets.UTF_8));
-            }
-        } catch (Exception ignore) {}
+        synchronized (VAULT_IO_LOCK) {
+            try {
+                File f = logFile(vid);
+                String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+                String entry = stamp + "  " + line + "\n";
+                try (FileOutputStream fos = new FileOutputStream(f, true)) {
+                    fos.write(entry.getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception ignore) {}
+        }
     }
 
     // ---- 配置（SharedPreferences，不含密码/密钥）----
