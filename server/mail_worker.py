@@ -123,7 +123,17 @@ def main() -> int:
     imap = imaplib.IMAP4_SSL(imap_host)
     try:
         imap.login(imap_user, imap_pass)
-        imap.select("INBOX")
+        # 网易（163/126）IMAP 的防滥用要求：登录后必须先发 ID 命令标识客户端，
+        # 否则后续 SELECT 会被拒绝（select 报 NO / SEARCH 报 illegal in state AUTH）。
+        # 其他服务商不支持 ID 时静默忽略。
+        try:
+            imaplib.Commands["ID"] = ("AUTH", "SELECTED")
+            imap._simple_command("ID", '("name" "PwdMgr" "version" "1.0")')
+        except Exception:
+            pass
+        typ, _ = imap.select("INBOX")
+        if typ != "OK":
+            raise RuntimeError(f"IMAP select INBOX failed: {typ}")
         typ, data = imap.search(None, "UNSEEN")
         if typ != "OK":
             log.warning("IMAP search failed: %s", typ)
@@ -133,6 +143,8 @@ def main() -> int:
         for num in ids:
             typ, parts = imap.fetch(num, "(RFC822)")
             if typ != "OK" or not parts or parts[0] is None:
+                log.warning("IMAP fetch failed for num=%s: typ=%s parts=%s",
+                            num, typ, len(parts) if parts else 0)
                 continue
             raw = parts[0][1]
             try:

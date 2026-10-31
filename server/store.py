@@ -246,6 +246,32 @@ def set_service_pwd_and_stamp(username: str, pwd_hash: bytes, pwd_salt: bytes,
         )
 
 
+def set_contact_hash(username: str, kind: str, value: str,
+                     pepper: str = "") -> None:
+    """管理员重绑联系方式：对归一化后的新联系方式重新计算哈希与查重列。
+
+    kind: "email" | "sms"。用户无该类别的旧绑定时也允许新增。
+    """
+    import contacts
+
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT contact_salt FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+        if row is None or row["contact_salt"] is None:
+            raise ValueError(f"no user or no contact salt: {username}")
+        salt = bytes(row["contact_salt"])
+        h = contacts.contact_hash(salt, kind, value)
+        u = contacts.contact_uniq(pepper, kind, value)
+        col, ucol = ("email_hash", "email_uniq") if kind == "email" else \
+                    ("phone_hash", "phone_uniq")
+        conn.execute(
+            f"UPDATE users SET {col} = ?, {ucol} = ? WHERE username = ?",
+            (h, u, username),
+        )
+
+
 def update_service_pwd(username: str, new_hash: bytes, new_salt: bytes) -> None:
     with _lock, _connect() as conn:
         conn.execute(

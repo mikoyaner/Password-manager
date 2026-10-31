@@ -8,10 +8,13 @@ Type=oneshot
 User=pwmanager
 Group=pwmanager
 WorkingDirectory=/opt/pwmanager/server
+Environment=PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
 EnvironmentFile=-/opt/pwmanager/server/admin.env
 ExecStart=/opt/pwmanager/venv/bin/python mail_worker.py
 NoNewPrivileges=yes
 ProtectSystem=strict
+# 重置密码要写数据库：数据目录是本单元唯一可写点
+ReadWritePaths=/opt/pwmanager/server/data
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

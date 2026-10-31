@@ -21,6 +21,7 @@ import io
 import json
 import os
 import shutil
+import sys
 import time
 from typing import Optional
 
@@ -31,10 +32,37 @@ import vault as vault_mod
 # ---- 路径 ----
 
 def app_dir() -> str:
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "PwdMgr")
+    """数据目录：打包版与 exe 同目录（便携，可整体拷走备份）；源码运行用 %APPDATA%\\PwdMgr。"""
+    if getattr(sys, "frozen", False):
+        d = os.path.dirname(sys.executable)
+    else:
+        d = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "PwdMgr")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def migrate_appdata_to_portable() -> int:
+    """一次性：把 %APPDATA%\\PwdMgr 的密码库与配置迁移到 exe 同目录（仅打包版执行）。
+
+    新位置已有数据则跳过对应项；旧目录保留不删（充当迁移前备份）。返回迁移项数。
+    """
+    if not getattr(sys, "frozen", False):
+        return 0
+    old = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "PwdMgr")
+    if not os.path.isdir(old) or old == app_dir():
+        return 0
+    moved = 0
+    old_vaults = os.path.join(old, "vaults")
+    new_vaults = vaults_root()
+    if os.path.isdir(old_vaults) and not os.listdir(new_vaults):
+        shutil.rmtree(new_vaults)
+        shutil.move(old_vaults, new_vaults)
+        moved += 1
+    old_cfg, new_cfg = os.path.join(old, "config.json"), config_path()
+    if os.path.isfile(old_cfg) and not os.path.isfile(new_cfg):
+        shutil.move(old_cfg, new_cfg)
+        moved += 1
+    return moved
 
 
 def vaults_root() -> str:

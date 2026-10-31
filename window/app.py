@@ -449,8 +449,9 @@ class NewVaultDialog(QDialog):
 class LoginStep1Dialog(QDialog):
     """登录服务器 · 第 1 步：用户名 + 用户密码（服务密码）。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, cfg: dict | None = None):
         super().__init__(parent)
+        self.cfg = cfg or {}
         self.setWindowTitle("登录服务器 · 第 1 步")
         self.setMinimumWidth(420)
         self.result: dict | None = None
@@ -459,6 +460,11 @@ class LoginStep1Dialog(QDialog):
         self.service_pwd = QLineEdit(); self.service_pwd.setEchoMode(QLineEdit.EchoMode.Password)
         f.addRow("用户名", self.username)
         f.addRow("用户密码", self.service_pwd)
+        fp_row = QHBoxLayout()
+        self.forgot_btn = QPushButton("忘记密码？")
+        self.forgot_btn.clicked.connect(self._forgot)
+        fp_row.addWidget(self.forgot_btn); fp_row.addStretch(1)
+        f.addRow(fp_row)
         hint = QLabel("第 1 步：用用户名 + 用户密码从服务器拉取云端密码库。")
         hint.setWordWrap(True); f.addRow(hint)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
@@ -467,6 +473,9 @@ class LoginStep1Dialog(QDialog):
         bb.accepted.connect(self._ok); bb.rejected.connect(self.reject)
         f.addRow(bb)
         self.username.setFocus()
+
+    def _forgot(self):
+        ForgotPwdDialog(self.cfg, self).exec()
 
     def _ok(self):
         u = self.username.text().strip()
@@ -1099,7 +1108,7 @@ class MainWindow(QMainWindow):
     def _login_flow(self) -> bool:
         """登录服务器：step1 账号 → 列出名下历史库挑一份 → step2 密码库密码 → 落地为本地新库。"""
         while True:
-            s1 = LoginStep1Dialog(self)
+            s1 = LoginStep1Dialog(self, self.cfg)
             if not s1.exec() or not s1.result:
                 return False
             u = s1.result["username"]; sp = s1.result["service_pwd"]
@@ -1717,6 +1726,8 @@ def main():
         import keyring  # noqa
     except Exception:
         missing.append("keyring")
+    # 打包版首次运行：把旧 %APPDATA%\PwdMgr 数据迁到 exe 同目录（便携模式）
+    storage.migrate_appdata_to_portable()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     if missing:
