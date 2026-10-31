@@ -106,7 +106,6 @@ PWMGR_CONTACT_PEPPER=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urand
 PWMGR_ADMIN_SMS_HINT=
 EOF
 fi
-chown root:pwmanager "$ADMIN_ENV"; chmod 640 "$ADMIN_ENV"
 # 幂等补键：旧版模板缺的键补齐；token/pepper 为空则自动生成
 for k in PWMGR_ADMIN_EMAIL PWMGR_IMAP_HOST PWMGR_IMAP_USER PWMGR_IMAP_PASS \
          PWMGR_SMTP_HOST PWMGR_SMTP_PORT PWMGR_SMTP_USER PWMGR_SMTP_PASS \
@@ -118,6 +117,7 @@ grep -qE "^PWMGR_SMS_HOOK_TOKEN=..*" "$ADMIN_ENV" || \
   sed -i "s/^PWMGR_SMS_HOOK_TOKEN=.*/PWMGR_SMS_HOOK_TOKEN=$(gen_hex)/" "$ADMIN_ENV"
 grep -qE "^PWMGR_CONTACT_PEPPER=..*" "$ADMIN_ENV" || \
   sed -i "s/^PWMGR_CONTACT_PEPPER=.*/PWMGR_CONTACT_PEPPER=$(gen_hex)/" "$ADMIN_ENV"
+chown root:pwmanager "$ADMIN_ENV"; chmod 640 "$ADMIN_ENV"
 chmod 640 "$ADMIN_ENV"
 systemctl daemon-reload
 systemctl enable --now pwmanager-mail.timer >/dev/null 2>&1 || true
