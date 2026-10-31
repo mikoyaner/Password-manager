@@ -142,6 +142,7 @@ def run():
 
     # 11. 忘记密码 v2.8：联系方式哈希存储 + 两步确认 + 随机临时密码
     auth._attempts.clear()
+    auth._pwd_cache.clear()
     import re as _re  # noqa: E402
     import forgot as forgot_mod  # noqa: E402
     import sqlite3 as _s  # noqa: E402
@@ -157,36 +158,67 @@ def run():
     conn.close()
 
     # 错误发件人：签发被拒（不产生待确认项），原密码仍有效
-    assert forgot_mod.issue_token("erin", "email", "attacker@evil.com")[0] == "mismatch"
+    assert forgot_mod.begin_reset("erin", "email", "attacker@evil.com")[0] == "mismatch"
     assert c.get("/vaults", headers=_auth("erin", "password123")).status_code == 200
     # 正确发件人（大小写/空格归一化）→ 签发 8 位确认码
-    res, token = forgot_mod.issue_token("erin", "email", " erin@example.com ")
-    assert res == "ok", res
+    res, payload = forgot_mod.begin_reset("erin", "email", " erin@example.com ")
+    assert res == "ok" and payload["action"] == "deliver_token", (res, payload)
+    token = payload["token"]
     assert _re.fullmatch(r"[A-HJ-NP-Z2-9]{8}", token), token
     # 错误确认者（发件人与签发时不一致）→ invalid_token
-    assert forgot_mod.confirm_reset(token, "attacker@evil.com")[0] == "invalid_token"
-    # 正确确认（大小写归一）→ 随机临时密码（12 位，绝不再是 86868686）
-    res2, temp = forgot_mod.confirm_reset(token, "Erin@Example.COM")
-    assert res2 == "ok" and len(temp) == 12 and temp != "86868686", (res2, temp)
-    # 旧密码失效、临时密码可登录
+    assert forgot_mod.confirm_by_token(token, "attacker@evil.com")[0] == "invalid_token"
+    # 正确确认（大小写归一）→ 两阶段：prepare 随机临时密码（12 位，绝不是 86868686）
+    res2, payload2 = forgot_mod.confirm_by_token(token, "Erin@Example.COM")
+    assert res2 == "ok" and payload2["action"] == "deliver_temp", (res2, payload2)
+    temp = payload2["temp"]
+    assert len(temp) == 12 and temp != "86868686", temp
+    # commit（CAS：以 prepare 时的旧哈希为条件）→ 旧密码失效、临时密码可登录
+    assert forgot_mod.commit_reset(payload2), "commit 应成功"
     assert c.get("/vaults", headers=_auth("erin", "password123")).status_code == 401
     assert c.get("/vaults", headers=_auth("erin", temp)).status_code == 200
     # 确认码一次性（用过即作废）
-    assert forgot_mod.confirm_reset(token, "erin@example.com")[0] == "invalid_token"
+    assert forgot_mod.confirm_by_token(token, "erin@example.com")[0] == "invalid_token"
+
     # 24h 内重复申请（未改密）→ 免确认码直接重发新的随机临时密码（用户要求）
-    res3, temp2 = forgot_mod.issue_token("erin", "email", "erin@example.com")
-    assert res3 == "resent" and len(temp2) == 12 and temp2 != temp, (res3, temp2)
+    res3, p3 = forgot_mod.begin_reset("erin", "email", "erin@example.com")
+    assert res3 == "ok" and p3["action"] == "deliver_temp", (res3, p3)
+    temp2 = p3["temp"]
+    assert forgot_mod.commit_reset(p3)
     assert c.get("/vaults", headers=_auth("erin", temp)).status_code == 401
     assert c.get("/vaults", headers=_auth("erin", temp2)).status_code == 200
-    # 用户自行改密 → 清除重置标记 → 恢复正常两步确认
-    assert c.post("/change_service_pwd", headers=_auth("erin", temp2),
+
+    # 重发限流：每用户每小时 3 次（第 4 次起拒绝，审计报告 P1-8）
+    last_temp = temp2
+    limited = 0
+    for i in range(4):
+        rl, pl = forgot_mod.begin_reset("erin", "email", "erin@example.com")
+        if rl == "ok" and pl["action"] == "deliver_temp":
+            assert forgot_mod.commit_reset(pl)
+            last_temp = pl["temp"]
+        elif rl == "resend_limited":
+            limited += 1
+            forgot_mod.audit("RESEND_LIMITED", user="erin", channel="email",
+                             sender="erin@example.com")
+    assert limited >= 1, "第 4 次申请应触发重发限流"
+    assert c.get("/vaults", headers=_auth("erin", last_temp)).status_code == 200
+
+    # 用户自行改密（用最新临时密码）→ 清除重置标记 → 恢复正常两步确认
+    assert c.post("/change_service_pwd", headers=_auth("erin", last_temp),
                   json={"new_pwd": "ChangedPwd-9"}).status_code == 200
-    res4, t3 = forgot_mod.issue_token("erin", "email", "erin@example.com")
-    assert res4 == "ok" and _re.fullmatch(r"[A-HJ-NP-Z2-9]{8}", t3)
-    res5, temp3 = forgot_mod.confirm_reset(t3, "erin@example.com")
-    assert res5 == "ok" and len(temp3) == 12
+    assert c.get("/vaults", headers=_auth("erin", last_temp)).status_code == 401
+    res5, p5 = forgot_mod.begin_reset("erin", "email", "erin@example.com")
+    assert res5 == "ok" and p5["action"] == "deliver_token", (res5, p5)
+    res6, p6 = forgot_mod.confirm_by_token(p5["token"], "erin@example.com")
+    assert res6 == "ok"
+    assert forgot_mod.commit_reset(p6)
+    temp3 = p6["temp"]
     assert c.get("/vaults", headers=_auth("erin", temp3)).status_code == 200
-    assert forgot_mod.confirm_reset(t3, "erin@example.com")[0] == "invalid_token"
+
+    # 管理员手动兜底：mismatch 拒绝 / 正确发件人 → 随机临时密码
+    assert forgot_mod.manual_reset("erin", "attacker@evil.com")[0] == "mismatch"
+    res7, temp7 = forgot_mod.manual_reset("erin", "erin@example.com")
+    assert res7 == "ok" and len(temp7) == 12
+    assert c.get("/vaults", headers=_auth("erin", temp7)).status_code == 200
 
     # /contact：未配置时返回空串
     assert c.get("/contact").json() == {"admin_email": "", "sms_hint": ""}
@@ -206,9 +238,9 @@ def run():
 
     # 12. 联系方式唯一性：A 绑定的邮箱/手机，B 不能再绑（归一化后比对）
     r = _reg(c, "gina", "password123", email="ERIN@example.com")
-    assert r.status_code == 409 and r.json()["detail"]["error"] == "contact_taken", r.text
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "register_conflict", r.text
     r = _reg(c, "gina", "password123", phone="138 0013 8000")
-    assert r.status_code == 409 and r.json()["detail"]["error"] == "contact_taken", r.text
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "register_conflict", r.text
     assert c.get("/vaults", headers=_auth("gina", "password123")).status_code == 401
 
     # 13. 审计日志：文件生成、结果齐全、发件人打码、180 天清理（删 90 天前行）
@@ -217,12 +249,13 @@ def run():
     assert os.path.exists(audit_path), "审计日志文件必须生成"
     text = open(audit_path, encoding="utf-8").read()
     assert "TOKEN_SENT user=erin" in text, "第 1 步签发必须记录"
-    assert "RESET_OK user=erin" in text, "正确重置必须记录"
+    assert text.count("RESET_OK user=erin") >= 5, "正确重置必须记录"
     assert "MISMATCH user=erin" in text, "错误尝试必须记录"
-    assert "RESET_RESENT user=erin" in text, "24h 内直接重发必须记录"
+    assert "RESEND_LIMITED user=erin" in text, "重发限流必须记录"
     assert "eri***@example.com" in text, "发件人必须打码"
     assert "erin@example.com" not in text, "明文邮箱不得出现在日志"
-    assert temp not in text, "临时密码绝不入日志"
+    for t7 in (temp, temp2, temp3, temp7):
+        assert t7 not in text, "临时密码绝不入日志"
     # 旧邮件（Date 超 60 分钟）→ FRESH_SKIP 丢弃
     import mail_worker as mw  # noqa: E402
     from email.parser import BytesParser as _BP  # noqa: E402
@@ -252,6 +285,7 @@ def run():
     assert r.status_code == 429, r.text
     os.environ["PWMGR_REG_PER_HOUR"] = "1000"
 
+    print("server v2.8 e2e: all ok")
     print("server v2.8 e2e: all ok")
 
 

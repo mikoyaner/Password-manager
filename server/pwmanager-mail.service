@@ -9,7 +9,6 @@ User=pwmanager
 Group=pwmanager
 WorkingDirectory=/opt/pwmanager/server
 Environment=PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
-Environment=PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/opt/pwmanager/mail.env
 ExecStart=/opt/pwmanager/venv/bin/python mail_worker.py

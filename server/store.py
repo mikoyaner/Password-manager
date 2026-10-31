@@ -183,12 +183,25 @@ def get_user_auth_row(username: str) -> Optional[dict]:
             "service_pwd_salt": bytes(row["service_pwd_salt"])}
 
 
+_last_touch: dict[str, float] = {}
+
+
 def touch_last_login(username: str) -> None:
+    """节流到每用户 5 分钟一次（审计报告 C3/C4：高频写会加剧 SQLite 锁竞争）。"""
+    now = time.time()
+    with _lock:
+        if now - _last_touch.get(username.lower(), 0) < 300:
+            return
+        _last_touch[username.lower()] = now
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE users SET last_login_at = ? WHERE username = ?",
             (int(time.time() * 1000), username),
         )
+    if len(_last_touch) > 4096:
+        stale = [k for k, t in _last_touch.items() if now - t > 3600]
+        for k in stale:
+            _last_touch.pop(k, None)
 
 
 def create_user_and_vault(*, username: str, service_pwd_hash: bytes,
@@ -245,14 +258,17 @@ def get_user_contact_row(username: str) -> Optional[dict]:
     """找回密码用：该用户的联系方式哈希与节流时间戳。不存在返回 None。"""
     with _lock, _connect() as conn:
         row = conn.execute(
-            "SELECT username, contact_salt, email_hash, phone_hash, last_forgot_at "
-            "FROM users WHERE username = ? COLLATE NOCASE",
+            "SELECT username, service_pwd_hash, service_pwd_salt, contact_salt, "
+            "email_hash, phone_hash, last_forgot_at "
+            "FROM users WHERE username = ?",
             (username,),
         ).fetchone()
     if row is None:
         return None
     return {
         "username": row["username"],
+        "service_pwd_hash": bytes(row["service_pwd_hash"]),
+        "service_pwd_salt": bytes(row["service_pwd_salt"]),
         "contact_salt": bytes(row["contact_salt"]) if row["contact_salt"] else None,
         "email_hash": bytes(row["email_hash"]) if row["email_hash"] else None,
         "phone_hash": bytes(row["phone_hash"]) if row["phone_hash"] else None,
@@ -261,16 +277,45 @@ def get_user_contact_row(username: str) -> Optional[dict]:
 
 
 def set_service_pwd_and_stamp(username: str, pwd_hash: bytes, pwd_salt: bytes,
-                              now_ms: int) -> None:
+                              now_ms: int, expect_old_hash: bytes | None = None
+                              ) -> bool:
     """忘记密码重置：写新 verifier 并盖 24h 节流时间戳。
 
-    用户名不区分大小写（找回码可能大小写不同；注册名本身保持原样）。
+    用户名**精确匹配**（审计报告 P0-3：注册/找回全链路大小写敏感）。
+    expect_old_hash 提供时做 CAS（审计报告 C2）：若用户在 prepare 之后自行
+    改密，则不覆盖（返回 False），避免刚设置的新密码被找回流程覆盖。
+    """
+    with _lock, _connect() as conn:
+        if expect_old_hash is not None:
+            cur = conn.execute(
+                "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
+                "last_forgot_at = ? WHERE username = ? AND service_pwd_hash = ?",
+                (pwd_hash, pwd_salt, now_ms, username, expect_old_hash),
+            )
+            return cur.rowcount > 0
+        conn.execute(
+            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
+            "last_forgot_at = ? WHERE username = ?",
+            (pwd_hash, pwd_salt, now_ms, username),
+        )
+        return True
+
+
+def change_password_and_clear_forgot(username: str, pwd_hash: bytes,
+                                     pwd_salt: bytes) -> None:
+    """用户自行改密：改密 + 清除 24h 重置标记，同一事务（审计报告 C2）。
+
+    之后的找回申请会走正常两步确认；同时调用方应清除该用户的待确认项。
     """
     with _lock, _connect() as conn:
         conn.execute(
-            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ?, "
-            "last_forgot_at = ? WHERE username = ? COLLATE NOCASE",
-            (pwd_hash, pwd_salt, now_ms, username),
+            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ? "
+            "WHERE username = ?",
+            (pwd_hash, pwd_salt, username),
+        )
+        conn.execute(
+            "UPDATE users SET last_forgot_at = NULL WHERE username = ?",
+            (username,),
         )
 
 
@@ -279,7 +324,7 @@ def clear_forgot_stamp(username: str) -> None:
     with _lock, _connect() as conn:
         conn.execute(
             "UPDATE users SET last_forgot_at = NULL "
-            "WHERE username = ? COLLATE NOCASE",
+            "WHERE username = ?",
             (username,),
         )
 
@@ -294,7 +339,7 @@ def set_contact_hash(username: str, kind: str, value: str,
 
     with _lock, _connect() as conn:
         row = conn.execute(
-            "SELECT contact_salt FROM users WHERE username = ? COLLATE NOCASE",
+            "SELECT contact_salt FROM users WHERE username = ?",
             (username,),
         ).fetchone()
         if row is None or row["contact_salt"] is None:
@@ -307,7 +352,7 @@ def set_contact_hash(username: str, kind: str, value: str,
         # 管理员重绑视为重新起算：清除 24h 找回节流标记
         conn.execute(
             f"UPDATE users SET {col} = ?, {ucol} = ?, last_forgot_at = NULL "
-            "WHERE username = ? COLLATE NOCASE",
+            "WHERE username = ?",
             (h, u, username),
         )
 

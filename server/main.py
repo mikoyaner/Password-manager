@@ -139,7 +139,7 @@ def _validate_username(username: str) -> None:
 
 
 # 短信找回码格式（用户要求）：01<用户名>d，如 01alicd 对应用户 alic（尾部 d 是短信标识）
-_SMS_CODE_RE = re.compile(r"^01([a-zA-Z0-9._-]{3,20})d$", re.IGNORECASE)
+_SMS_CODE_RE = re.compile(r"^01([a-zA-Z0-9._-]{3,20})d$")
 
 
 class SmsUpReq(BaseModel):
@@ -224,7 +224,7 @@ def register(req: RegisterReq, request: Request):
         raise HTTPException(status_code=400, detail={"error": "invalid_contact"})
     if store.contact_taken(email_uniq, phone_uniq):
         auth.record_failure(ip)
-        raise HTTPException(status_code=409, detail={"error": "contact_taken"})
+        log.info("register conflict: contact taken"); raise HTTPException(status_code=409, detail={"error": "register_conflict"})
 
     # 先把可选的首版密文校验完再建账号：密文非法时不留下半个账号
     raw: bytes | None = None
@@ -235,7 +235,7 @@ def register(req: RegisterReq, request: Request):
 
     if store.user_exists(req.username):
         auth.record_failure(ip)
-        raise HTTPException(status_code=409, detail={"error": "username_taken"})
+        raise HTTPException(status_code=409, detail={"error": "register_conflict"})
 
     salt = auth.new_salt()
     verifier = auth.derive_verifier(req.service_pwd, salt)
@@ -261,8 +261,8 @@ def register(req: RegisterReq, request: Request):
         auth.record_failure(ip)
         # 唯一索引兜底并发：联系方式冲突与用户名冲突分别提示
         if "uniq" in str(e).lower():
-            raise HTTPException(status_code=409, detail={"error": "contact_taken"})
-        raise HTTPException(status_code=409, detail={"error": "username_taken"})
+            log.info("register conflict: contact taken"); raise HTTPException(status_code=409, detail={"error": "register_conflict"})
+        raise HTTPException(status_code=409, detail={"error": "register_conflict"})
     except Exception as e:
         auth.record_failure(ip)
         raise HTTPException(status_code=500, detail={"error": "db_error", "msg": str(e)})
@@ -312,12 +312,13 @@ def put_vault(req: PutVaultReq,
 @app.post("/change_service_pwd")
 def change_service_pwd(req: ChangeServicePwdReq,
                        username: str = Depends(auth.basic_auth)):
-    # 当前密码已由 HTTP Basic 校验；这里只写新的 verifier
+    # 当前密码已由 HTTP Basic 校验；这里只写新的 verifier。
+    # 审计报告 C2：改密 + 清除 24h 重置标记同一事务；改密后未用确认码作废。
     salt = auth.new_salt()
     verifier = auth.derive_verifier(req.new_pwd, salt)
-    store.update_service_pwd(username, verifier, salt)
-    # 用户已自行改密：清除 24h 重置标记（此后再申请找回走正常两步确认）
-    store.clear_forgot_stamp(username)
+    store.change_password_and_clear_forgot(username, verifier, salt)
+    forgot._drop_pending_for_user(username)
+    auth.invalidate_user_cache(username)
     return {"ok": True}
 
 
@@ -327,6 +328,7 @@ def delete_account(req: DeleteAccountReq,
     if not req.confirm:
         raise HTTPException(status_code=400, detail={"error": "confirm_required"})
     store.delete_account(username)
+    auth.invalidate_user_cache(username)
     return {"ok": True}
 
 

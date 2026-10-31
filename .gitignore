@@ -57,3 +57,6 @@ worklog.md
 
 # ZCode 会话内部文件
 .zcode/
+server/forgot_pending.json
+server/*.scan.json
+server/forgot.log

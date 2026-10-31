@@ -1,22 +1,28 @@
-"""忘记密码（v2.8）：两步确认 + 随机临时密码。
+"""忘记密码（v2.8）：两步确认 + 随机临时密码 + 两阶段落库。
 
 流程（邮件通道，根治发件人伪造）：
   第 1 步 worker 收到 01<用户名> 且**发件人哈希与注册绑定匹配** → 生成一次性
-  确认码（15 分钟有效），自动回复到发件邮箱（= 注册邮箱）；
-  第 2 步 用户回复该邮件（正文含确认码，发件人不变 = 证明能收信）→ worker 校验
-  确认码 → 生成**随机临时密码**回复给用户，并写入数据库。
+  确认码（15 分钟有效，绑定发件人），自动回复到发件邮箱（= 注册邮箱）；
+  第 2 步 用户回复该邮件（正文含确认码，发件人不变 = 证明能收信）→ worker
+  校验确认码 → 生成**随机临时密码**并回复给用户 → 发送成功后才写入数据库
+  （两阶段提交：SMTP 失败自动回滚旧密码并保留确认码，用户不会被锁在门外）。
 
 安全要点：
   - **不存在全局固定密码**：临时密码只发往"通过哈希验证的注册邮箱"。攻击者
-    伪造 From 只能让真正的邮箱主人收到确认码，自己拿不到任何凭据（根治接管）；
-  - 确认码 = "能收信"证明，一次性、15 分钟过期、绑定发件人；
-  - 24h 节流在最终重置时生效；
-  - 短信通道无下行能力：/internal/sms-up 仅通知管理员人工处理（见 main.py）；
-  - 临时密码**绝不写日志**；审计文件（forgot.log）记录成功与失败，发件人打码，
-    每 180 天清理一次、删除 90 天前的日志行（用户指定，严格按字面）。
+    伪造 From 只能让真正的邮箱主人收到确认码/临时密码，自己拿不到任何凭据；
+  - 24h 内已重置且用户**未自行改密**（改密会清除标记）→ 免确认码直接重发
+    **新的**随机临时密码（用户要求）；每用户每小时最多重发 3 次（防刷）；
+  - 24h 节流在最终落库时以 CAS 条件更新生效；
+  - 短信通道无下行能力：/internal/sms-up 仅提醒管理员人工处理（见 main.py）；
+  - 临时密码**绝不写日志/审计**；审计文件（forgot.log）记录成功与失败，
+    发件人打码；每 180 天清理一次、删除 90 天前的日志行（用户指定，严格按字面）；
+  - 用户名**精确匹配**（审计报告 P0-3：注册/登录/找回全链路一致，杜绝
+    大小写变体跨账号重置）。
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import hmac
 import json
 import logging
@@ -31,21 +37,28 @@ import store
 
 log = logging.getLogger("pwmanager.forgot")
 
-_THROTTLE_MS = 24 * 3600 * 1000              # 每用户 24h 内只重置一次
+_THROTTLE_MS = 24 * 3600 * 1000              # 每用户 24h 内只重置一次（落库时 CAS 生效）
 _TOKEN_TTL_S = 15 * 60                       # 确认码有效期
 _PWD_LEN = 12                                # 随机临时密码长度
 _PWD_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_RESEND_LIMIT = 3                            # 24h 窗口内"直接重发"的最多次数（防 DoS 刷重置）
+_RESEND_WINDOW_MS = 3600 * 1000
 
-# 结果码：ok / no_user / mismatch / throttled / invalid_contact / invalid_token
+# 结果码：ok / no_user / mismatch / invalid_contact / invalid_token / throttled
+# / resent / resend_limited
 
 # ---- 审计日志（用户指定：正确与错误都记录；发件人打码）----
-# 文件位于数据目录（沙箱唯一可写点）。清理策略（用户指定，严格按字面）：
-# 清理动作每 180 天执行一次，执行时删除 90 天前的日志行 → 实际保留 90~180 天。
+# 文件位于数据目录（沙箱唯一可写点）。
 
 _AUDIT_PATH: str | None = None
 _CLEAN_INTERVAL_S = 180 * 86400
 _KEEP_S = 90 * 86400
 _LINE_TS = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+
+try:
+    import fcntl
+except ImportError:                          # 非 POSIX（开发机 Windows）降级为无文件锁
+    fcntl = None
 
 
 def _data_dir() -> str:
@@ -58,6 +71,23 @@ def _audit_path() -> str:
     if _AUDIT_PATH is None:
         _AUDIT_PATH = os.path.join(_data_dir(), "forgot.log")
     return _AUDIT_PATH
+
+
+@contextlib.contextmanager
+def _file_lock():
+    """跨进程互斥（mail worker 与 API 进程共用数据目录）。POSIX 用 flock。"""
+    path = _audit_path() + ".lock"
+    f = open(path, "a+")
+    try:
+        if fcntl is not None:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
 
 
 def _mask(contact: str) -> str:
@@ -75,7 +105,7 @@ def audit(event: str, *, user: str = "-", channel: str = "-",
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = (f"[{ts}] {event} user={user} channel={channel} "
                 f"sender={_mask(sender)}" + (f" detail={detail}" if detail else ""))
-        with open(_audit_path(), "a", encoding="utf-8") as f:
+        with _file_lock(), open(_audit_path(), "a", encoding="utf-8") as f:
             f.write(line + "\n")
         log.info("audit: %s", line)
     except Exception:
@@ -87,43 +117,40 @@ def cleanup_if_due(now: float | None = None) -> None:
     now = time.time() if now is None else now
     state = _audit_path() + ".clean.state"
     try:
-        try:
-            with open(state, encoding="utf-8") as f:
-                last = float(f.read().strip() or 0)
-        except Exception:
-            last = 0.0
-        if now - last < _CLEAN_INTERVAL_S:
-            return
-        cut = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - _KEEP_S))
-        removed = kept = 0
-        path = _audit_path()
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-            out = []
-            for ln in lines:
-                m = _LINE_TS.match(ln)
-                if m and m.group(1) < cut:
-                    removed += 1
-                    continue
-                kept += 1
-                out.append(ln)
-            if removed:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.writelines(out)
-        with open(state, "w", encoding="utf-8") as f:
-            f.write(str(now))
-        log.info("forgot audit cleanup: removed=%d kept=%d cut<=%s",
-                 removed, kept, cut)
+        with _file_lock():
+            try:
+                with open(state, encoding="utf-8") as f:
+                    last = float(f.read().strip() or 0)
+            except Exception:
+                last = 0.0
+            if now - last < _CLEAN_INTERVAL_S:
+                return
+            cut = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - _KEEP_S))
+            removed = kept = 0
+            path = _audit_path()
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    lines = f.readlines()
+                out = []
+                for ln in lines:
+                    m = _LINE_TS.match(ln)
+                    if m and m.group(1) < cut:
+                        removed += 1
+                        continue
+                    kept += 1
+                    out.append(ln)
+                if removed:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.writelines(out)
+            with open(state, "w", encoding="utf-8") as f:
+                f.write(str(now))
+            log.info("forgot audit cleanup: removed=%d kept=%d cut<=%s",
+                     removed, kept, cut)
     except Exception:
         log.exception("forgot audit cleanup failed")
 
 
-# ---- 确认码 / 临时密码 ----
-
-def _pwd_charset() -> str:
-    return _PWD_ALPHABET
-
+# ---- 确认码 / 临时密码 / 待确认状态 ----
 
 def gen_token() -> str:
     return "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
@@ -131,11 +158,35 @@ def gen_token() -> str:
 
 
 def gen_temp_pwd() -> str:
-    return "".join(secrets.choice(_pwd_charset()) for _ in range(_PWD_LEN))
+    return "".join(secrets.choice(_PWD_ALPHABET) for _ in range(_PWD_LEN))
 
 
 def _pending_path() -> str:
     return os.path.join(_data_dir(), "forgot_pending.json")
+
+
+def _sender_h(kind: str, sender: str) -> str:
+    """发件人哈希：pending 文件不存明文联系方式（审计报告 P1-7）。"""
+    if kind == "email":
+        v = contacts.normalize_email(sender)
+    else:
+        v = contacts.normalize_phone(sender)
+    return hmac.new(b"pwdmgr-pending", f"{kind}:{v}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def sender_hash_for(kind: str, sender: str) -> str:
+    return _sender_h(kind, sender)
+
+
+def write_json_atomic(path: str, obj) -> None:
+    """原子写 JSON：tmp + fsync + rename（审计报告 C6）。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _load_pending() -> dict:
@@ -147,81 +198,144 @@ def _load_pending() -> dict:
 
 
 def _save_pending(d: dict) -> None:
-    try:
-        with open(_pending_path(), "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=1)
-    except Exception:
-        log.exception("pending save failed")
+    """原子写：tmp + fsync + rename（审计报告 C6）。"""
+    path = _pending_path()
+    tmp = path + ".tmp"
+    with _file_lock():
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            log.exception("pending save failed")
+            with contextlib.suppress(Exception):
+                os.remove(tmp)
 
 
-def _drop_pending_for_user(username: str, token: str | None = None) -> None:
+def _drop_pending_for_user(username: str) -> None:
     d = _load_pending()
     kept = {t: v for t, v in d.items()
-            if v.get("user", "").lower() != username.lower()
-            and (token is None or t != token)}
+            if v.get("user", "").lower() != username.lower()}
     _save_pending(kept)
 
 
-def issue_token(username: str, kind: str, contact: str) -> tuple[str, str]:
-    """第 1 步：验证发件人哈希后签发一次性确认码。
+def _resend_allowed(username: str) -> bool:
+    """重发频率限制：每用户每小时最多 3 次（审计报告 P1-8 的 DoS 口）。"""
+    path = os.path.join(_data_dir(), "forgot_resend.state")
+    key = username.lower()
+    now_ms = int(time.time() * 1000)
+    with _file_lock():
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            d = {}
+        lst = [t for t in d.get(key, []) if now_ms - t < _RESEND_WINDOW_MS]
+        if len(lst) >= _RESEND_LIMIT:
+            _save = {**d, key: lst}
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(_save, f)
+            except Exception:
+                log.exception("resend state save failed")
+            return False
+        lst.append(now_ms)
+        d[key] = lst
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except Exception:
+            log.exception("resend state save failed")
+        return True
 
-    返回 (result, token)。result: ok / no_user / mismatch / invalid_contact。
-    同一用户重复申请会替换旧确认码。
+
+# ---- 核心流程 ----
+
+def _verify_sender(row: dict, kind: str, contact: str) -> str | None:
+    """发件人哈希比对。返回错误码或 None（通过）。"""
+    try:
+        got = contacts.contact_hash(row["contact_salt"], kind, contact)
+    except ValueError:
+        return "invalid_contact"
+    expected = row["email_hash"] if kind == "email" else row["phone_hash"]
+    if not expected or not hmac.compare_digest(got, expected):
+        return "mismatch"
+    return None
+
+
+def begin_reset(username: str, kind: str, contact: str) -> tuple[str, dict]:
+    """第 1 步 / 24h 内免确认码：验证发件人 → 生成待投递内容（未落库）。
+
+    返回 (result, payload)。
+    - result: ok / no_user / mismatch / invalid_contact
+    - payload["action"]:
+        "deliver_token" —— pending 已保存；投递确认码（第 2 步走 confirm_by_token）
+        "deliver_temp"  —— payload["commit"] 就绪；投递临时密码后必须调用
+                           commit_reset(payload)（两阶段：先发信后落库）
+    payload["rollback"] 携带旧密码哈希，投递失败时回滚用。
     """
     username = (username or "").strip()
     if not username:
         audit("NO_USER", detail="empty username")
-        return "no_user", ""
+        return "no_user", {}
     row = store.get_user_contact_row(username)
     if row is None or row["contact_salt"] is None:
         log.info("forgot: no such user (username suppressed)")
         audit("NO_USER", user=username, channel=kind, sender=contact)
-        return "no_user", ""
+        return "no_user", {}
 
-    try:
-        got = contacts.contact_hash(row["contact_salt"], kind, contact)
-    except ValueError:
-        audit("INVALID_CONTACT", user=username, channel=kind, sender=contact)
-        return "invalid_contact", ""
-    expected = row["email_hash"] if kind == "email" else row["phone_hash"]
-    if not expected or not hmac.compare_digest(got, expected):
-        log.info("forgot: contact mismatch via %s", kind)
-        audit("MISMATCH", user=username, channel=kind, sender=contact)
-        return "mismatch", ""
+    err = _verify_sender(row, kind, contact)
+    if err:
+        if err == "mismatch":
+            log.info("forgot: contact mismatch via %s", kind)
+        audit(err.upper() if err != "mismatch" else "MISMATCH",
+              user=username, channel=kind, sender=contact)
+        return err, {}
 
-    # 24h 内已重置且用户**未自行改密**（改密会清除 last_forgot_at）→ 免确认码，
-    # 直接生成新的随机临时密码发给发件人（用户要求：不更改密码时直接重发，
-    # 省去再走一遍确认码）。旧临时密码随即作废。
     now_ms = int(time.time() * 1000)
     last = row["last_forgot_at"] or 0
+    temp = gen_temp_pwd()
+    salt = auth.new_salt()
+    verifier = auth.derive_verifier(temp, salt)
+    commit = {"user": username, "hash": verifier, "salt": salt, "now": now_ms,
+              "channel": kind,
+              "old_hash": bytes(row["service_pwd_hash"]).hex(),
+              "old_salt": bytes(row["service_pwd_salt"]).hex()}
+
     if last and now_ms - last < _THROTTLE_MS:
-        temp = gen_temp_pwd()
-        salt = auth.new_salt()
-        verifier = auth.derive_verifier(temp, salt)
-        store.set_service_pwd_and_stamp(username, verifier, salt, now_ms)
-        log.info("forgot: re-resent new temp password (within 24h, unchanged)")
-        audit("RESET_RESENT", user=username, channel=kind, sender=contact,
-              detail="within 24h and password unchanged: new temp issued directly")
-        return "resent", temp
+        # 24h 内已重置且未自行改密（改密会清除标记）：免确认码直接重发新临时密码。
+        # 频率限制防 DoS 刷重置（审计报告 P1-8）。
+        if not _resend_allowed(username):
+            audit("RESEND_LIMITED", user=username, channel=kind, sender=contact,
+                  detail="resend rate limited, password unchanged")
+            return "resend_limited", {}
+        audit("RESET_PREPARED", user=username, channel=kind, sender=contact,
+              detail="within 24h: deliver new temp password directly")
+        return "ok", {"action": "deliver_temp", "temp": temp, "commit": commit}
 
     token = gen_token()
     pending = _load_pending()
-    # 同一用户只保留最新确认码；顺带清掉过期项
     now = time.time()
     pending = {t: v for t, v in pending.items() if v.get("exp", 0) > now}
+    # 同一用户只保留最新确认码（审计报告 P1-6：旧码随新码签发作废）
+    pending = {t: v for t, v in pending.items()
+               if v.get("user", "").lower() != username.lower()}
     pending[token] = {"user": username, "kind": kind,
-                      "sender": contact, "exp": now + _TOKEN_TTL_S}
+                      "sender_h": _sender_h(kind, contact), "exp": now + _TOKEN_TTL_S}
     _save_pending(pending)
     audit("TOKEN_SENT", user=username, channel=kind, sender=contact,
           detail="confirmation code issued, expires in 15min")
-    return "ok", token
+    return "ok", {"action": "deliver_token", "token": token}
 
 
-def confirm_reset(token: str, sender: str) -> tuple[str, str]:
-    """第 2 步：确认码 + 发件人（必须与第 1 步相同）→ 随机临时密码。
+def confirm_by_token(token: str, sender: str) -> tuple[str, dict]:
+    """第 2 步：确认码 + 发件人（必须与第 1 步相同）→ 待投递的随机临时密码。
 
-    返回 (result, temp_pwd)。result: ok / invalid_token / throttled。
-    临时密码只在 ok 时返回，**绝不写日志/审计**。
+    返回 (result, payload)。result: ok / invalid_token；ok 时 payload 含
+    "temp" 与 "commit"——**先投递邮件，成功后再 commit_reset**（两阶段）。
+    确认码一次性；用户已被删除 → invalid_token（不误报节流）。
     """
     token = (token or "").strip().upper()
     sender_n = (sender or "").strip()
@@ -229,35 +343,74 @@ def confirm_reset(token: str, sender: str) -> tuple[str, str]:
     entry = pending.get(token)
     if entry is None or entry.get("exp", 0) < time.time():
         if entry is not None:
-            _drop_pending_for_user(entry.get("user", ""), token)
+            _drop_pending_for_user(entry.get("user", ""))
         audit("TOKEN_INVALID", sender=sender_n, detail="expired or unknown token")
-        return "invalid_token", ""
-    if entry.get("sender", "").strip().lower() != sender_n.strip().lower():
-        audit("TOKEN_SENDER_MISMATCH", user=entry.get("user", "-"),
-              channel=entry.get("kind", "-"), sender=sender_n)
-        return "invalid_token", ""
-    username = entry.get("user", "")
+        return "invalid_token", {}
+
     kind = entry.get("kind", "email")
+    if entry.get("sender_h") != _sender_h(kind, sender_n):
+        audit("TOKEN_SENDER_MISMATCH", user=entry.get("user", "-"),
+              channel=kind, sender=sender_n)
+        return "invalid_token", {}
+    username = entry.get("user", "")
 
     row = store.get_user_contact_row(username)
-    now_ms = int(time.time() * 1000)
-    last = (row or {}).get("last_forgot_at", 0) or 0
-    if row is None or now_ms - last < _THROTTLE_MS:
-        _drop_pending_for_user(username, token)
-        log.info("forgot: throttled (within 24h)")
-        audit("THROTTLED", user=username, channel=kind, sender=sender_n,
-              detail="reset within 24h, password unchanged")
-        return "throttled", ""
+    if row is None or row["contact_salt"] is None:
+        _drop_pending_for_user(username)
+        audit("NO_USER", user=username, channel=kind, sender=sender_n,
+              detail="user deleted after token issued")
+        return "invalid_token", {}
 
+    now_ms = int(time.time() * 1000)
     temp = gen_temp_pwd()
     salt = auth.new_salt()
     verifier = auth.derive_verifier(temp, salt)
-    store.set_service_pwd_and_stamp(username, verifier, salt, now_ms)
-    _drop_pending_for_user(username, token)
-    log.info("forgot: password reset to random temp via %s", kind)
-    audit("RESET_OK", user=username, channel=kind, sender=sender_n,
-          detail="random temp password issued via two-step confirm")
-    return "ok", temp
+    commit = {"user": username, "hash": verifier, "salt": salt, "now": now_ms,
+              "channel": kind,
+              "old_hash": bytes(row["service_pwd_hash"]).hex(),
+              "old_salt": bytes(row["service_pwd_salt"]).hex()}
+    audit("RESET_PREPARED", user=username, channel=kind, sender=sender_n,
+          detail="confirmation code verified")
+    return "ok", {"action": "deliver_temp", "temp": temp, "commit": commit,
+                  "token": token}
+
+
+def commit_reset(payload: dict) -> bool:
+    """两阶段提交：把 prepare 好的临时密码写入数据库（清 pending、盖节流戳）。
+
+    CAS（审计报告 C2）：以 prepare 时的旧密码哈希为条件——若用户在确认码
+    有效期内自行改密，则不覆盖（返回 False，已发出的临时密码作废）。
+    """
+    c = payload["commit"]
+    ok = store.set_service_pwd_and_stamp(
+        c["user"], c["hash"], c["salt"], c["now"],
+        expect_old_hash=bytes.fromhex(c["old_hash"]),
+    )
+    if ok:
+        _drop_pending_for_user(c["user"])
+        auth.invalidate_user_cache(c["user"])   # 旧密码的验证缓存立即失效
+        audit("RESET_OK", user=c["user"], channel=c.get("channel", "-"),
+              detail="random temp password committed after delivery")
+        log.info("forgot: password reset committed for %s", c["user"])
+    else:
+        log.warning("forgot: commit raced with user password change, skipped")
+    return ok
+
+
+def rollback_reset(payload: dict) -> None:
+    """投递失败：回滚到旧密码哈希（CAS：用户若在期间自行改密则不覆盖）。"""
+    c = payload["commit"]
+    with store._lock, store._connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET service_pwd_hash = ?, service_pwd_salt = ? "
+            "WHERE username = ? COLLATE NOCASE AND service_pwd_hash = ?",
+            (bytes.fromhex(c["old_hash"]), bytes.fromhex(c["old_salt"]),
+             c["user"], bytes.fromhex(c["old_hash"])),
+        )
+        if cur.rowcount == 0:
+            log.info("forgot rollback: password already changed elsewhere, kept")
+    audit("SEND_FAILED", user=c["user"], channel="email",
+          detail="delivery failed, rolled back, confirmation retained")
 
 
 def manual_reset(username: str, contact: str) -> tuple[str, str]:
@@ -268,19 +421,16 @@ def manual_reset(username: str, contact: str) -> tuple[str, str]:
         audit("NO_USER", user=username, channel="manual", sender=contact)
         return "no_user", ""
     kind = "email" if "@" in contact else "sms"
-    try:
-        got = contacts.contact_hash(row["contact_salt"], kind, contact)
-    except ValueError:
-        return "invalid_contact", ""
-    expected = row["email_hash"] if kind == "email" else row["phone_hash"]
-    if not expected or not hmac.compare_digest(got, expected):
-        audit("MISMATCH", user=username, channel="manual", sender=contact)
-        return "mismatch", ""
+    err = _verify_sender(row, kind, contact)
+    if err:
+        audit(err.upper(), user=username, channel="manual", sender=contact)
+        return err, ""
     now_ms = int(time.time() * 1000)
     temp = gen_temp_pwd()
     salt = auth.new_salt()
     verifier = auth.derive_verifier(temp, salt)
     store.set_service_pwd_and_stamp(username, verifier, salt, now_ms)
+    auth.invalidate_user_cache(username)   # 旧密码的验证缓存立即失效
     audit("RESET_OK", user=username, channel="manual", sender=contact,
           detail="admin manual reset, temp pwd delivered out-of-band")
     return "ok", temp
