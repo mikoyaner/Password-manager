@@ -39,7 +39,7 @@ if getattr(sys, "frozen", False):
 
 try:
     from PyQt6.QtCore import Qt, QTimer
-    from PyQt6.QtGui import QAction, QGuiApplication
+    from PyQt6.QtGui import QAction, QGuiApplication, QLockFile
     from PyQt6.QtWidgets import (
         QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
         QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
@@ -47,7 +47,7 @@ try:
         QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
     )
 except ImportError:
-    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtCore import QLockFile, Qt, QTimer
     from PyQt5.QtGui import QGuiApplication
     from PyQt5.QtWidgets import (
         QApplication, QAction, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -1729,7 +1729,6 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_TITLE)
     # 审计报告 C1：单实例锁——两个进程写同一个 vault.enc 会互相覆盖/损坏
-    from PyQt6.QtNetwork import QLockFile
     import tempfile as _tf
     _single = QLockFile(os.path.join(_tf.gettempdir(), "PwdMgr.single.lock"))
     if not _single.tryLock(100):
