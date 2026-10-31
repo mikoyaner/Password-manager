@@ -191,6 +191,36 @@ def run():
     assert r.status_code == 409 and r.json()["detail"]["error"] == "contact_taken", r.text
     assert c.get("/vaults", headers=_auth("gina", "password123")).status_code == 401
 
+    # 13. 审计日志：文件生成、结果齐全、发件人打码、180 天清理（删 90 天前行）
+    import time as _time  # noqa: E402
+    audit_path = os.path.join(os.path.dirname(os.environ["PWMGR_DB"]), "forgot.log")
+    assert os.path.exists(audit_path), "审计日志文件必须生成"
+    text = open(audit_path, encoding="utf-8").read()
+    assert "RESET_OK user=erin" in text, "正确重置必须记录"
+    assert "MISMATCH user=erin" in text, "错误尝试必须记录"
+    assert "THROTTLED user=erin" in text, "节流必须记录"
+    assert "eri***@example.com" in text, "发件人必须打码"
+    assert "erin@example.com" not in text, "明文邮箱不得出现在日志"
+    # 旧邮件（Date 超 60 分钟）→ FRESH_SKIP 丢弃
+    import mail_worker as mw  # noqa: E402
+    from email.message import EmailMessage as _EM  # noqa: E402
+    old_mail = _EM()
+    old_mail["From"] = "erin@example.com"
+    old_mail["Subject"] = "01erin"
+    old_mail["Date"] = "Mon, 01 Jan 2024 00:00:00 +0000"
+    old_mail.set_content("01erin")
+    mw._process_message(old_mail.as_bytes())
+    text = open(audit_path, encoding="utf-8").read()
+    assert "FRESH_SKIP" in text, "超时旧邮件必须被丢弃并记录"
+    # 清理：写一条 2020 年的日志 + 把清理状态归零 → 应删除旧行并记录清理时间
+    with open(audit_path, "a", encoding="utf-8") as f:
+        f.write("[2020-01-01 00:00:00] RESET_OK user=ancient\n")
+    forgot_mod.cleanup_if_due(_time.time())
+    text = open(audit_path, encoding="utf-8").read()
+    assert "user=ancient" not in text, "90 天前的日志必须被清理"
+    assert "RESET_OK user=erin" in text, "90 天内的日志必须保留"
+    assert os.path.exists(audit_path + ".clean.state"), "清理状态文件必须存在"
+
     print("server v2.7 e2e: all ok")
 
 

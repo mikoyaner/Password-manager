@@ -20,10 +20,11 @@ import os
 import re
 import smtplib
 import sys
+from datetime import datetime, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
 
 import forgot
 
@@ -33,6 +34,9 @@ log = logging.getLogger("pwmanager.mail")
 
 # 邮件里的找回码：01<用户名>（负向断言防止匹配更长串的前缀）
 _CODE_RE = re.compile(r"01([a-zA-Z0-9._-]{3,20})(?![a-zA-Z0-9._-])")
+
+# 用户指定：邮件接收时间与服务器时间相差不得超过 60 分钟，超时旧邮件直接丢弃
+_FRESH_SECONDS = 60 * 60
 
 RESET_REPLY = (
     "你的用户密码已重置为初始密码：86868686\n\n"
@@ -44,6 +48,20 @@ RESET_REPLY = (
 def _extract_code(text: str) -> str | None:
     m = _CODE_RE.search(text or "")
     return m.group(1) if m else None
+
+
+def _is_fresh(msg) -> bool:
+    """用户指定：邮件接收时间与服务器时间相差不大于 60 分钟，否则丢弃。"""
+    d = msg.get("Date")
+    if not d:
+        return False
+    try:
+        dt = parsedate_to_datetime(str(d))
+    except Exception:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return abs((datetime.now(timezone.utc) - dt).total_seconds()) <= _FRESH_SECONDS
 
 
 def _message_text(msg) -> str:
@@ -93,9 +111,16 @@ def _smtp_send_reply(to_addr: str) -> None:
 def _process_message(raw: bytes) -> None:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
     sender = parseaddr(str(msg.get("From", "")))[1]
+    if not _is_fresh(msg):
+        log.info("mail older than %ds: discarded", _FRESH_SECONDS)
+        forgot.audit("FRESH_SKIP", user="-", channel="email", sender=sender,
+                     detail="mail older than 60min, discarded")
+        return
     code = _extract_code(_message_text(msg))
     if not code or not sender:
-        log.info("mail without code/sender: marked read, ignored")
+        log.info("mail without code/sender: discarded")
+        forgot.audit("NO_CODE", channel="email", sender=sender,
+                     detail="no 01<username> code or no sender")
         return
     result = forgot.attempt_reset(code, "email", sender)
     if result == "ok":
@@ -116,6 +141,8 @@ def main() -> int:
     imap_host = os.environ.get("PWMGR_IMAP_HOST", "")
     imap_user = os.environ.get("PWMGR_IMAP_USER", "")
     imap_pass = os.environ.get("PWMGR_IMAP_PASS", "")
+    # 审计日志清理（用户指定：每 180 天执行一次，删除 90 天前的日志行）
+    forgot.cleanup_if_due()
     if not (imap_host and imap_user and imap_pass):
         log.info("IMAP 未配置（admin.env），本次跳过")
         return 0
