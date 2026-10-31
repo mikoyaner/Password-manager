@@ -274,6 +274,16 @@ def set_service_pwd_and_stamp(username: str, pwd_hash: bytes, pwd_salt: bytes,
         )
 
 
+def clear_forgot_stamp(username: str) -> None:
+    """用户自行改密后清除 24h 重置标记：NULL = 无近期重置，下次找回走正常两步确认。"""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE users SET last_forgot_at = NULL "
+            "WHERE username = ? COLLATE NOCASE",
+            (username,),
+        )
+
+
 def set_contact_hash(username: str, kind: str, value: str,
                      pepper: str = "") -> None:
     """管理员重绑联系方式：对归一化后的新联系方式重新计算哈希与查重列。

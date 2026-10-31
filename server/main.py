@@ -316,6 +316,8 @@ def change_service_pwd(req: ChangeServicePwdReq,
     salt = auth.new_salt()
     verifier = auth.derive_verifier(req.new_pwd, salt)
     store.update_service_pwd(username, verifier, salt)
+    # 用户已自行改密：清除 24h 重置标记（此后再申请找回走正常两步确认）
+    store.clear_forgot_stamp(username)
     return {"ok": True}
 
 

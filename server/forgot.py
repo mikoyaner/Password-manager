@@ -189,6 +189,21 @@ def issue_token(username: str, kind: str, contact: str) -> tuple[str, str]:
         audit("MISMATCH", user=username, channel=kind, sender=contact)
         return "mismatch", ""
 
+    # 24h 内已重置且用户**未自行改密**（改密会清除 last_forgot_at）→ 免确认码，
+    # 直接生成新的随机临时密码发给发件人（用户要求：不更改密码时直接重发，
+    # 省去再走一遍确认码）。旧临时密码随即作废。
+    now_ms = int(time.time() * 1000)
+    last = row["last_forgot_at"] or 0
+    if last and now_ms - last < _THROTTLE_MS:
+        temp = gen_temp_pwd()
+        salt = auth.new_salt()
+        verifier = auth.derive_verifier(temp, salt)
+        store.set_service_pwd_and_stamp(username, verifier, salt, now_ms)
+        log.info("forgot: re-resent new temp password (within 24h, unchanged)")
+        audit("RESET_RESENT", user=username, channel=kind, sender=contact,
+              detail="within 24h and password unchanged: new temp issued directly")
+        return "resent", temp
+
     token = gen_token()
     pending = _load_pending()
     # 同一用户只保留最新确认码；顺带清掉过期项

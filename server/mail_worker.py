@@ -216,14 +216,24 @@ def _process_message(msg, raw: bytes) -> str:
         log.info("mail without code/token: left unread")
         return "skip"
 
-    result, token = forgot.issue_token(code, "email", sender)
+    result, payload = forgot.issue_token(code, "email", sender)
     if result == "ok":
         _smtp_send(sender, "密码重置确认码",
-                   f"确认码：{token}\n\n"
-                   f"有效期 15 分钟。请**回复本邮件**（或用同一邮箱再发一封），"
-                   f"正文中包含该确认码，系统确认后会把随机临时密码发送到本邮箱。\n"
-                   "（本邮件由系统自动发送）")
+                   f"验证码：{payload}\n\n"
+                   f"有效期 15 分钟。\n\n"
+                   f"操作步骤：**复制上面的验证码，新建一封空白邮件**（收件人填写本邮箱地址），"
+                   f"把验证码粘贴到正文后发送。系统确认后会把随机临时密码发送到本邮箱。\n"
+                   "注意：请勿直接回复本邮件；本邮件由系统自动发送，请勿回复。")
         log.info("confirmation code issued")
+        return "code"
+    if result == "resent":
+        # 24h 内已重置且未改密：免确认码直接重发新的随机临时密码（用户要求）
+        _smtp_send(sender, "您的临时密码",
+                   f"临时密码：{payload}\n\n"
+                   "你于 24 小时内申请过重置且尚未修改密码，现直接为你重发新的临时密码。\n"
+                   "请立即用它登录，并马上在客户端『修改用户密码』中设置你自己的新密码。\n"
+                   "（本邮件由系统自动发送）")
+        log.info("re-resent new temp password (within 24h)")
         return "code"
     if result == "mismatch":
         # 验证码存在但发件人与注册绑定不符：按用户规格丢弃 + 标已读

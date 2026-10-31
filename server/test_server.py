@@ -173,9 +173,20 @@ def run():
     assert c.get("/vaults", headers=_auth("erin", temp)).status_code == 200
     # 确认码一次性（用过即作废）
     assert forgot_mod.confirm_reset(token, "erin@example.com")[0] == "invalid_token"
-    # 24h 节流（在最终重置时生效）
-    _, t2 = forgot_mod.issue_token("erin", "email", "erin@example.com")
-    assert forgot_mod.confirm_reset(t2, "erin@example.com")[0] == "throttled"
+    # 24h 内重复申请（未改密）→ 免确认码直接重发新的随机临时密码（用户要求）
+    res3, temp2 = forgot_mod.issue_token("erin", "email", "erin@example.com")
+    assert res3 == "resent" and len(temp2) == 12 and temp2 != temp, (res3, temp2)
+    assert c.get("/vaults", headers=_auth("erin", temp)).status_code == 401
+    assert c.get("/vaults", headers=_auth("erin", temp2)).status_code == 200
+    # 用户自行改密 → 清除重置标记 → 恢复正常两步确认
+    assert c.post("/change_service_pwd", headers=_auth("erin", temp2),
+                  json={"new_pwd": "ChangedPwd-9"}).status_code == 200
+    res4, t3 = forgot_mod.issue_token("erin", "email", "erin@example.com")
+    assert res4 == "ok" and _re.fullmatch(r"[A-HJ-NP-Z2-9]{8}", t3)
+    res5, temp3 = forgot_mod.confirm_reset(t3, "erin@example.com")
+    assert res5 == "ok" and len(temp3) == 12
+    assert c.get("/vaults", headers=_auth("erin", temp3)).status_code == 200
+    assert forgot_mod.confirm_reset(t3, "erin@example.com")[0] == "invalid_token"
 
     # /contact：未配置时返回空串
     assert c.get("/contact").json() == {"admin_email": "", "sms_hint": ""}
@@ -208,7 +219,7 @@ def run():
     assert "TOKEN_SENT user=erin" in text, "第 1 步签发必须记录"
     assert "RESET_OK user=erin" in text, "正确重置必须记录"
     assert "MISMATCH user=erin" in text, "错误尝试必须记录"
-    assert "THROTTLED user=erin" in text, "节流必须记录"
+    assert "RESET_RESENT user=erin" in text, "24h 内直接重发必须记录"
     assert "eri***@example.com" in text, "发件人必须打码"
     assert "erin@example.com" not in text, "明文邮箱不得出现在日志"
     assert temp not in text, "临时密码绝不入日志"
