@@ -10,7 +10,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # PyQt6 6.11 的 DLL 在部分机器上无法加载（本机实测），打包仅使用 PyQt5；
+    # app.py 的兼容层在未打包运行时会优先尝试 PyQt6、失败回退 PyQt5
+    excludes=['PyQt6'],
     noarchive=False,
     optimize=0,
 )

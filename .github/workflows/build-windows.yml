@@ -19,8 +19,9 @@ jobs:
           python-version: "3.12"
 
       - name: 安装依赖
-        # cryptography 钉在本地验证过的 44.0.1：46.x 在打包环境下有 legacy provider 加载问题
-        run: pip install PyQt6 argon2-cffi "cryptography==44.0.1" keyring "pyinstaller==6.21.0"
+        # 打包使用 PyQt5（PyQt6 6.11 的 DLL 在部分机器上无法加载，见 app.py 兼容层；
+        # cryptography 钉在本地验证过的 44.0.1）
+        run: pip install "PyQt5==5.15.10" argon2-cffi "cryptography==44.0.1" keyring "pyinstaller==6.21.0"
 
       - name: PyInstaller 打包
         working-directory: window

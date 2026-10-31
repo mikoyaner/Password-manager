@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import secrets
 import string
@@ -24,14 +25,36 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QGuiApplication
-from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
-    QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
-)
+# Qt 绑定兼容层：优先 PyQt6；导入失败（如本机缺 6.11 所需的新版运行库）自动回退
+# PyQt5（打包时 spec 排除 PyQt6 即为纯 PyQt5 包）。两者 API 差异只有一处：
+# QAction 在 Qt6 位于 QtGui，在 Qt5 位于 QtWidgets。其余 scoped 枚举两版通用。
+if getattr(sys, "frozen", False):
+    # windowed 打包模式下 Qt 平台插件路径可能解析失败，显式指向包内目录
+    for _pp in (os.path.join(getattr(sys, "_MEIPASS", ""), "PyQt6", "Qt6", "plugins", "platforms"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "PyQt5", "Qt5", "plugins", "platforms"),
+                os.path.join(getattr(sys, "_MEIPASS", ""), "PyQt5", "Qt", "plugins", "platforms")):
+        if os.path.isdir(_pp):
+            os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", _pp)
+            break
+
+try:
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtGui import QAction, QGuiApplication
+    from PyQt6.QtWidgets import (
+        QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+        QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+        QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
+        QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    )
+except ImportError:
+    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtGui import QGuiApplication
+    from PyQt5.QtWidgets import (
+        QApplication, QAction, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+        QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+        QListWidgetItem, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
+        QStackedWidget, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    )
 
 import crypto
 import keyring_store
