@@ -17,7 +17,7 @@ python -m venv .venv
 
 ## ⚠️ 重要：不要用 Anaconda 的 Python 直接跑
 
-本机的 `python` 默认指向 Anaconda（`D:\anacoda3`）。Anaconda 自带的 DLL 与
+本机的 `python` 默认指向 Anaconda（`Anaconda 安装目录`）。Anaconda 自带的 DLL 与
 PyPI 版 PyQt6 冲突，直接 `python app.py` 会报：
 
 ```
