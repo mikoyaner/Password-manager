@@ -2,7 +2,10 @@
 Description=Run pwdmgr mail worker every minute
 
 [Timer]
-OnUnitActiveSec=60s
+# OnBootSec 锚定首次触发（OnUnitActiveSec 在服务从未运行时永远不触发）；
+# OnUnitInactiveSec：上一轮跑完后 60s 再跑（oneshot 链式调度的正确写法）
+OnBootSec=90s
+OnUnitInactiveSec=60s
 AccuracySec=10s
 Unit=pwmanager-mail.service
 
