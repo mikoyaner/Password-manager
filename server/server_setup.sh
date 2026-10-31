@@ -65,6 +65,10 @@ chown root:root "$BIN_DIR/manage-as-service.sh"; chmod 755 "$BIN_DIR/manage-as-s
 log "安装 sudoers 白名单..."
 cat > "$SUDOERS" <<'EOF'
 pwdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart pwmanager.service, /usr/bin/systemctl stop pwmanager.service, /usr/bin/systemctl start pwmanager.service, /usr/bin/systemctl status pwmanager.service
+pwdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+pwdeploy ALL=(root) NOPASSWD: /usr/bin/install -m 0644 /opt/pwmanager/server/pwmanager.service /etc/systemd/system/pwmanager.service
+pwdeploy ALL=(root) NOPASSWD: /usr/bin/install -m 0644 /opt/pwmanager/server/pwmanager-mail.service /etc/systemd/system/pwmanager-mail.service
+pwdeploy ALL=(root) NOPASSWD: /usr/bin/install -m 0644 /opt/pwmanager/server/pwmanager-mail.timer /etc/systemd/system/pwmanager-mail.timer
 pwdeploy ALL=(pwmanager) NOPASSWD: /opt/pwmanager/bin/manage-as-service.sh *
 EOF
 chown root:root "$SUDOERS"; chmod 440 "$SUDOERS"
@@ -103,6 +107,18 @@ PWMGR_ADMIN_SMS_HINT=
 EOF
 fi
 chown root:pwmanager "$ADMIN_ENV"; chmod 640 "$ADMIN_ENV"
+# 幂等补键：旧版模板缺的键补齐；token/pepper 为空则自动生成
+for k in PWMGR_ADMIN_EMAIL PWMGR_IMAP_HOST PWMGR_IMAP_USER PWMGR_IMAP_PASS \
+         PWMGR_SMTP_HOST PWMGR_SMTP_PORT PWMGR_SMTP_USER PWMGR_SMTP_PASS \
+         PWMGR_SMS_HOOK_TOKEN PWMGR_CONTACT_PEPPER PWMGR_ADMIN_SMS_HINT; do
+  grep -q "^$k=" "$ADMIN_ENV" || echo "$k=" >> "$ADMIN_ENV"
+done
+gen_hex() { openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+grep -qE "^PWMGR_SMS_HOOK_TOKEN=..*" "$ADMIN_ENV" || \
+  sed -i "s/^PWMGR_SMS_HOOK_TOKEN=.*/PWMGR_SMS_HOOK_TOKEN=$(gen_hex)/" "$ADMIN_ENV"
+grep -qE "^PWMGR_CONTACT_PEPPER=..*" "$ADMIN_ENV" || \
+  sed -i "s/^PWMGR_CONTACT_PEPPER=.*/PWMGR_CONTACT_PEPPER=$(gen_hex)/" "$ADMIN_ENV"
+chmod 640 "$ADMIN_ENV"
 systemctl daemon-reload
 systemctl enable --now pwmanager-mail.timer >/dev/null 2>&1 || true
 
