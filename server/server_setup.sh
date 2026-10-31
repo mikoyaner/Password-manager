@@ -51,10 +51,13 @@ if [ "$SRC_DIR" != "$SERVER_DIR" ] && [ -f "$SRC_DIR/pwmanager.service" ]; then
   done
 fi
 
-# ---- 2) manage.py 包装脚本（以 pwmanager 身份 + 正确的 PWMGR_DB 运行运维工具） ----
+# ---- 2) manage.py 包装脚本（以 pwmanager 身份运行；加载 admin.env 供 set_contact 取 pepper）----
 cat > "$BIN_DIR/manage-as-service.sh" <<'EOF'
 #!/bin/sh
-export PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
+set -a
+PWMGR_DB=/opt/pwmanager/server/data/pwmanager.db
+[ -f /opt/pwmanager/server/admin.env ] && . /opt/pwmanager/server/admin.env
+set +a
 exec /opt/pwmanager/venv/bin/python /opt/pwmanager/server/manage.py "$@"
 EOF
 chown root:root "$BIN_DIR/manage-as-service.sh"; chmod 755 "$BIN_DIR/manage-as-service.sh"

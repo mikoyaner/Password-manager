@@ -266,8 +266,10 @@ def set_contact_hash(username: str, kind: str, value: str,
         u = contacts.contact_uniq(pepper, kind, value)
         col, ucol = ("email_hash", "email_uniq") if kind == "email" else \
                     ("phone_hash", "phone_uniq")
+        # 管理员重绑视为重新起算：清除 24h 找回节流标记
         conn.execute(
-            f"UPDATE users SET {col} = ?, {ucol} = ? WHERE username = ?",
+            f"UPDATE users SET {col} = ?, {ucol} = ?, last_forgot_at = NULL "
+            "WHERE username = ?",
             (h, u, username),
         )
 
