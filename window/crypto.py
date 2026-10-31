@@ -9,6 +9,11 @@ from __future__ import annotations
 import os
 import struct
 
+# PyInstaller 打包环境下 cryptography 捆绑的 OpenSSL legacy provider 可能加载失败
+# 并直接抛 RuntimeError（对本应用无关紧要：只用 AES-GCM/SHA-256，均为默认提供方
+# 的非 legacy 算法）。必须在导入 cryptography 之前设置，禁用其加载。
+os.environ.setdefault("CRYPTOGRAPHY_OPENSSL_NO_LEGACY", "1")
+
 from argon2.low_level import Type, hash_secret_raw
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

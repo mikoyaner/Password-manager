@@ -19,7 +19,8 @@ jobs:
           python-version: "3.12"
 
       - name: 安装依赖
-        run: pip install PyQt6 argon2-cffi cryptography keyring pyinstaller
+        # cryptography 钉在本地验证过的 44.0.1：46.x 在打包环境下有 legacy provider 加载问题
+        run: pip install PyQt6 argon2-cffi "cryptography==44.0.1" keyring "pyinstaller==6.21.0"
 
       - name: PyInstaller 打包
         working-directory: window
