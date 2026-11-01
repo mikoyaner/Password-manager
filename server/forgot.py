@@ -270,6 +270,35 @@ def _resend_allowed(username: str) -> bool:
         return True
 
 
+def retract_resend(username: str) -> None:
+    """投递失败时回退本轮 _resend_allowed 记入的重发时间戳。
+
+    否则 SMTP 连续故障时，worker 的重试轮次会被误计为用户重发，
+    第 4 轮起 RESEND_LIMITED 直接把申请邮件标已读丢弃——
+    SMTP 恢复后申请已永久丢失，重试/放弃机制全部失效。
+    """
+    path = os.path.join(_data_dir(), "forgot_resend.state")
+    now_ms = int(time.time() * 1000)
+    with _file_lock():
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            return
+        lst = [t for t in d.get(username, []) if now_ms - t < _RESEND_WINDOW_MS]
+        if lst:
+            lst.pop()          # 撤销最近一次（即本轮 begin_reset 记入的那次）
+        if lst:
+            d[username] = lst
+        else:
+            d.pop(username, None)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except Exception:
+            log.exception("resend state retract failed")
+
+
 # ---- 核心流程 ----
 
 def _verify_sender(row: dict, kind: str, contact: str) -> str | None:

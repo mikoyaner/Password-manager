@@ -6,6 +6,7 @@
 运行: python test_server.py
 """
 import base64
+import json
 import os
 import tempfile
 
@@ -258,6 +259,7 @@ def run():
     for t7 in (temp, temp2, temp3, temp7):
         assert t7 not in text, "临时密码绝不入日志"
     # 旧邮件（Date 超 60 分钟）→ FRESH_SKIP 丢弃
+    import json as _json  # noqa: E402
     import mail_worker as mw  # noqa: E402
     from email.parser import BytesParser as _BP  # noqa: E402
     from email import policy as _policy  # noqa: E402
@@ -286,7 +288,163 @@ def run():
     assert r.status_code == 429, r.text
     os.environ["PWMGR_REG_PER_HOUR"] = "1000"
 
-    print("server v2.8 e2e: all ok")
+    # 16. mail_worker.main() 状态机（审计报告 D2/N1/N3/S2 验收：假 IMAP + 假 SMTP）
+    import mail_worker as mw  # noqa: E402
+    import imaplib as _imaplib  # noqa: E402
+    import smtplib as _smtplib  # noqa: E402
+    from email.message import EmailMessage as _EM2  # noqa: E402
+    from email.utils import formatdate as _fmtdate  # noqa: E402
+
+    class _FakeIMAP:
+        """假 IMAP：实现 worker 用到的最小接口，UNSEEN 按 seen 编号集合计算。"""
+
+        def __init__(self, mails):
+            self.mails = list(mails)
+            self.seen = set()          # 1-based 编号
+            self.stored = []           # (编号, flags) —— 验证 \Seen 标记时机
+
+        def login(self, u, p): pass
+
+        def _simple_command(self, *a): pass
+
+        def _untagged_response(self, typ, dat, name): return "OK", [b"ID ok"]
+
+        def select(self, box): return "OK", [str(len(self.mails)).encode()]
+
+        def search(self, charset, *crit):
+            assert crit[0] == "UNSEEN"
+            ids = [str(i + 1).encode() for i in range(len(self.mails))
+                   if (i + 1) not in self.seen]
+            return "OK", [b" ".join(ids)]
+
+        def fetch(self, num, spec):
+            i = int(num) - 1
+            raw = self.mails[i]
+            return "OK", [(num + b" (BODY.PEEK[] {%d}" % len(raw), raw), b")"]
+
+        def store(self, num, cmd, flags):
+            self.stored.append((int(num), flags))
+            self.seen.add(int(num))
+
+        def logout(self): pass
+
+    class _FakeSMTP:
+        sent = []
+        fail = False
+
+        def __init__(self, *a, **k): pass
+
+        def login(self, u, p): pass
+
+        def send_message(self, m):
+            if _FakeSMTP.fail:
+                raise RuntimeError("smtp down")
+            _FakeSMTP.sent.append(m)
+
+        def quit(self): pass
+
+    real_imap = _imaplib.IMAP4_SSL
+    real_smtp = _smtplib.SMTP_SSL
+    mail_box = []                  # 假收件箱（原始字节列表，用例自行投递）
+    os.environ.update(
+        PWMGR_IMAP_HOST="imap.test", PWMGR_IMAP_USER="admin@test",
+        PWMGR_IMAP_PASS="x", PWMGR_SMTP_HOST="smtp.test",
+        PWMGR_SMTP_PORT="465", PWMGR_SMTP_USER="admin@test",
+        PWMGR_SMTP_PASS="x", PWMGR_ADMIN_EMAIL="admin@test")
+    fake_imaps = []
+
+    def _mk_imap(host):
+        inst = _FakeIMAP(mail_box)
+        fake_imaps.append(inst)
+        return inst
+
+    _imaplib.IMAP4_SSL = _mk_imap
+    _smtplib.SMTP_SSL = lambda *a, **k: _FakeSMTP()
+
+    def _fresh_mail(frm, code):
+        m = _EM2()
+        m["From"] = frm
+        m["To"] = "admin@test"
+        m["Subject"] = "01" + code
+        m["Date"] = _fmtdate(localtime=True)
+        m.set_content(code)
+        return m.as_bytes()
+
+    def _run_main():
+        assert mw.main() == 0
+
+    def _audit_text():
+        return open(audit_path, encoding="utf-8").read()
+
+    def _state():
+        try:
+            return json.load(open(mw._state_path(), encoding="utf-8"))
+        except FileNotFoundError:
+            return {"seen_ids": {}, "retries": {}}   # 首轮无状态文件是正常态
+
+    # 前面用例耗尽了 erin 的重发配额：清空重发计数，保证 T1-T3 走"投递失败→重试"
+    _resend_state = os.path.join(os.path.dirname(os.environ["PWMGR_DB"]),
+                                 "forgot_resend.state")
+    if os.path.exists(_resend_state):
+        os.remove(_resend_state)
+
+    # T1：投递失败 → 待重试（保持未读、不入 seen_ids、计数累积）
+    _FakeSMTP.fail = True
+    mail_box.append(_fresh_mail("erin@example.com", "erin"))
+    mw.main()
+    fi = fake_imaps[-1]
+    st = _state()
+    assert len(st["retries"]) == 1 and list(st["retries"].values()) == [1], st
+    assert 1 not in fi.seen and 1 not in fi.stored, "待重试邮件必须保持未读"
+    assert "DELIVER_FAILED" in _audit_text(), "投递失败必须入审计"
+
+    # T2：再失败一轮 → 计数累积到 2
+    mw.main()
+    st = _state()
+    assert list(st["retries"].values()) == [2], st
+
+    # T3：连续失败至 25 轮上限 → DELIVER_GIVEUP（保持未读、进入去重状态、管理员告警）
+    for _ in range(23):
+        mw.main()
+    st = _state()
+    assert st["retries"] == {}, "放弃后重试计数必须清除"
+    assert "DELIVER_GIVEUP" in _audit_text(), "25 轮失败后必须放弃并审计"
+    assert 1 not in fake_imaps[-1].seen, "放弃的邮件保持未读"
+
+    # 放弃后再跑一轮：去重状态生效，不再重复处理（无新告警）
+    n_giveup = _audit_text().count("DELIVER_GIVEUP")
+    mw.main()
+    assert _audit_text().count("DELIVER_GIVEUP") == n_giveup, "放弃后不得重复处理"
+
+    # T4：两步全链路（新用户 mailuser，无 24h 重置历史 → 走确认码路径）
+    _FakeSMTP.fail = False
+    _FakeSMTP.sent.clear()
+    r = c.post("/register", json={"username": "mailuser",
+                                  "service_pwd": "password123",
+                                  "email": "mailuser@example.com"})
+    assert r.status_code == 200, r.text
+    mail_box.append(_fresh_mail("mailuser@example.com", "mailuser"))
+    mw.main()   # 第 1 步：确认码投递
+    assert len(_FakeSMTP.sent) == 1 and "确认码" in _FakeSMTP.sent[0].get("Subject", ""),         "第 1 步必须发出确认码邮件"
+    token = _re.search(r"验证码：([A-HJ-NP-Z2-9]{8})", _FakeSMTP.sent[0].get_content()).group(1)
+    # 用户回复：新邮件正文带确认码（同一发件人）
+    reply = _EM2()
+    reply["From"] = "mailuser@example.com"
+    reply["To"] = "admin@test"
+    reply["Subject"] = "Re: 密码重置确认码"
+    reply["Date"] = _fmtdate(localtime=True)
+    reply.set_content(token)
+    mail_box.append(reply.as_bytes())
+    mw.main()   # 第 2 步：临时密码投递 + 落库
+    assert len(_FakeSMTP.sent) == 2 and "临时密码" in _FakeSMTP.sent[1].get("Subject", ""),         "第 2 步必须发出临时密码邮件"
+    temp_pwd = _re.search(r"临时密码：([A-Za-z0-9]{12})", _FakeSMTP.sent[1].get_content()).group(1)
+    r = c.get("/vaults", headers=_auth("mailuser", temp_pwd))
+    assert r.status_code == 200, "临时密码必须可登录"
+    assert "RESET_DELIVERED" in _audit_text(), "全链路成功必须审计"
+
+    _imaplib.IMAP4_SSL = real_imap
+    _smtplib.SMTP_SSL = real_smtp
+
     print("server v2.8 e2e: all ok")
 
 

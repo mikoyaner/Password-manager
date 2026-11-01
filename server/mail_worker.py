@@ -9,9 +9,10 @@
   - 验证失败（码存在但发件人不匹配/用户不存在）→ 丢弃 + 标已读；
   - 其他无关邮件：**保持未读、不改动**（Message-ID 记入状态文件防重复扫描）。
 
-投递安全（审计报告 P0-2）：临时密码邮件**发送成功后才写数据库**；
-SMTP 失败自动回滚（CAS 保留用户可能已自行设置的新密码）、确认码保留、
-邮件保持未读下轮自动重试；同一封连续失败 3 轮后放弃并审计 DELIVER_GIVEUP。
+投递安全（审计报告 P0-2 两阶段）：临时密码邮件**发送成功后才写数据库**；
+SMTP 失败则不落库、确认码保留、邮件保持未读下轮自动重试；同一封连续失败
+25 轮（约 25 分钟）后放弃：保持未读、进入去重状态不再处理，并给管理员发告警
+（DELIVER_GIVEUP）。
 
 配置全部来自环境变量（systemd EnvironmentFile=mail.env 注入）：
   PWMGR_IMAP_HOST / PWMGR_IMAP_USER / PWMGR_IMAP_PASS
@@ -63,20 +64,30 @@ def _state_path() -> str:
     return forgot._audit_path() + ".scan.json"
 
 
-def _load_state() -> tuple[set, dict]:
+def _load_state() -> tuple[dict, dict]:
     try:
         with open(_state_path(), encoding="utf-8") as f:
             d = json.load(f)
-        return set(d.get("seen_ids", [])), dict(d.get("retries", {}))
+        raw = d.get("seen_ids", {})
+        if isinstance(raw, list):
+            # 旧格式 [mid, ...]：无时间戳，按最早处理（优先淘汰）
+            seen = {m: 0.0 for m in raw}
+        else:
+            seen = {m: float(t) for m, t in raw.items()}
+        return seen, dict(d.get("retries", {}))
+    except FileNotFoundError:
+        return {}, {}   # 首次运行无状态文件是正常态（审计报告 N2）
     except Exception:
         # 审计报告 D2：状态损坏必须可见——静默吞掉会让重试计数/去重全部失效
         log.exception("scan state 损坏，按空状态继续")
-        return set(), {}
+        return {}, {}
 
 
-def _save_state(seen_ids: set, retries: dict) -> None:
+def _save_state(seen: dict, retries: dict) -> None:
+    """审计报告 N3：按时间淘汰（保留最近 _SCAN_STATE_MAX 条），不再按字典序。"""
+    keep = dict(sorted(seen.items(), key=lambda kv: kv[1])[-_SCAN_STATE_MAX:])
     forgot.write_json_atomic(_state_path(), {
-        "seen_ids": sorted(seen_ids)[-_SCAN_STATE_MAX:],
+        "seen_ids": keep,
         "retries": {k: v for k, v in list(retries.items())[-_SCAN_STATE_MAX:]},
     })
 
@@ -294,6 +305,9 @@ def _process_message(msg, raw: bytes) -> tuple[str, str]:
                     log.warning("24h resend raced with user password change")
             else:
                 log.warning("temp delivery failed: mail left unread for retry")
+                # 投递失败不计入用户的重发配额：否则 SMTP 连续故障 3 轮后
+                # RESEND_LIMITED 会把申请邮件标已读丢弃，重试机制失效
+                forgot.retract_resend(code)
                 forgot.audit("DELIVER_FAILED", user=code, channel="email",
                              sender=sender,
                              detail="temp mail delivery failed, will retry")
@@ -330,7 +344,7 @@ def main() -> int:
                     "确认码发件人哈希无法安全计算，本轮跳过处理")
         return 0
 
-    seen_ids, retries = _load_state()
+    seen, retries = _load_state()
     imap = imaplib.IMAP4_SSL(imap_host)
     try:
         imap.login(imap_user, imap_pass)
@@ -362,7 +376,7 @@ def main() -> int:
             raw = parts[0][1]
             msg = BytesParser(policy=policy.default).parsebytes(raw)
             mid = _mail_id(msg, raw)
-            if mid in seen_ids:
+            if mid in seen:
                 continue   # 已扫描过（终态或放弃）：跳过，仍保持未读
             try:
                 kind, sender = _process_message(msg, raw)
@@ -375,7 +389,7 @@ def main() -> int:
                 if n >= _RETRY_GIVEUP_ROUNDS:
                     # 审计报告 S2：放弃时保持未读（不标 \Seen），并给管理员发告警；
                     # 进入去重状态停止重试，管理员修复后让用户重发申请即可。
-                    seen_ids.add(mid)
+                    seen[mid] = time.time()
                     retries.pop(mid, None)
                     try:
                         _smtp_send(os.environ["PWMGR_ADMIN_EMAIL"],
@@ -388,20 +402,20 @@ def main() -> int:
                     forgot.audit("DELIVER_GIVEUP", channel="email", sender=sender,
                                  detail=f"delivery failed {n} consecutive rounds, "
                                         f"mail kept unread, admin alerted")
-                _save_state(seen_ids, retries)
+                _save_state(seen, retries)
                 continue
             if kind == "handled":
                 imap.store(num, "+FLAGS", "\\Seen")
-                seen_ids.add(mid)
+                seen[mid] = time.time()
                 retries.pop(mid, None)
                 processed += 1
                 if processed >= _MAX_PROCESSED_PER_RUN:
                     log.info("per-run processing cap reached (%d)", processed)
                     break
             else:   # unrelated：保持未读，仅记入去重状态
-                seen_ids.add(mid)
+                seen[mid] = time.time()
                 retries.pop(mid, None)
-            _save_state(seen_ids, retries)
+            _save_state(seen, retries)
         return 0
     finally:
         try:
