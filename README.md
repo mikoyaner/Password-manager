@@ -158,7 +158,9 @@ curl -k -X DELETE https://<服务器地址>:8443/account -u '用户名:用户密
 
 删本地库（云端删了不会动本地，两边独立）：
 ```bash
-rm -rf "%APPDATA%\PwdMgr\vaults\1"     # 电脑端：删 vid=1 单库；删整个 vaults 目录=清空全部
+# 电脑端（打包版 exe）：删 exe 同目录 vaults\1 = 删 vid=1 单库；删整个 vaults 目录=清空全部
+rm -rf "<exe所在目录>/vaults/1"
+# 电脑端（源码运行）：数据在 %APPDATA%\PwdMgr\vaults\
 "D:/Android SDK/platform-tools/adb.exe" uninstall com.pwdmgr   # 安卓端：App 无逐库删除入口，卸载即清私有数据
 ```
 
@@ -168,7 +170,33 @@ rm -rf "%APPDATA%\PwdMgr\vaults\1"     # 电脑端：删 vid=1 单库；删整�
 # 方式2：
 python E:\密码管理器\window\app.py
 ```
-本地数据：`%APPDATA%\PwdMgr\vaults\<vid>\{vault.enc,meta.json,sync.log}`，配置 `%APPDATA%\PwdMgr\config.json`。
+本地数据（源码运行）：`%APPDATA%\PwdMgr\vaults\<vid>\{vault.enc,meta.json,sync.log}`，配置 `%APPDATA%\PwdMgr\config.json`。
+**打包版 exe 是便携模式**，数据全部在 exe 同目录，见下一节。
+
+## 数据与密钥在哪（备份 / 迁移 / 换机）
+
+**三端都没有独立的"密钥文件"。** 加密密钥 = Argon2id(密码库密码, salt)，
+只在解锁会话的内存里，永不落盘；salt(16B) + nonce(12B) 就在 `vault.enc`
+的 49 字节文件头里（三端逐字节同构）。所以"库文件 + 你脑子里的密码"就是全部。
+
+### exe 版（打包版，便携模式）
+- **分发/运行只需要 `密码管理器.exe` 一个文件**（PyInstaller 单文件，无需 _internal）。
+- 首次运行在 **exe 同目录**生成：
+  - `config.json` —— 服务器地址 / 证书指纹 / 剪贴板清空秒数 / last_vid（无敏感明文）
+  - `vaults\<vid>\` —— `vault.enc`（密文）+ `meta.json`（明文元数据）+ `sync.log`
+- **备份 / 换机 = 拷走 `密码管理器.exe` + `config.json` + `vaults\` 整个目录**（放同一目录即可恢复）。
+- 勾选"记住用户密码"的服务密码存在 **Windows 凭据管理器**（服务名 `PwdMgr`），
+  绑定当前 Windows 用户——**不随目录拷贝走**，换电脑/换 Windows 账号后重输一次即可。
+- 旧版数据（%APPDATA%\PwdMgr）首次运行自动迁到 exe 同目录，旧目录保留不删（当迁移前备份）。
+
+### APK 版（安卓）
+- 库文件在 app **私有内部存储**：`/data/data/com.pwdmgr/files/vaults/<vid>/{vault.enc,meta.json,sync.log}`，
+  配置在 `/data/data/com.pwdmgr/shared_prefs/pwdmgr_config.xml`。无 root 时任何应用/用户都读不到。
+- 记住的服务密码：`EncryptedSharedPreferences`（**Android Keystore** 硬件密钥加密），
+  绑定设备——卸载/清除数据/换机即失效，重输即可。
+- **备份方式 = 推送到云端**（密文，服务器保留 5 份历史）。本地文件无 root 拷不出；
+  卸载 app 即删私有数据，没推送过云端的库无法恢复。「导出 CSV」是明文出口，仅作迁移临时用，导完即删。
+- 换机恢复：新机装 APK → 登录服务器拉取（云端密文用**密码库密码**解密，与设备无关）。
 
 ---
 
