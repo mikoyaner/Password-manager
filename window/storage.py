@@ -213,7 +213,17 @@ def delete_vault(vid: str) -> None:
 
 def create_vault(password: str, *, last_account: str = "") -> tuple[str, vault_mod.Vault]:
     """新建一个空的本地库，分配自增 vid，加密落盘。返回 (vid, Vault)。"""
-    vid = next_vid()
+    # 审计报告 C2：vid 撞号防护（目录创建原子性，撞号则重试下一个号）
+    for _ in range(100):
+        candidate = next_vid()
+        try:
+            os.makedirs(os.path.join(vaults_root(), candidate))
+            vid = candidate
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise RuntimeError("无法分配可用的库编号（连续冲突）")
     now = int(time.time() * 1000)
     label = f"初始 {time.strftime('%Y-%m-%d', time.localtime(now / 1000))}"
     v = vault_mod.Vault(username="", pwd_time=now, modified_at=now, label=label)

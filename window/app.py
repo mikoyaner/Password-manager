@@ -75,12 +75,10 @@ def today_label(kind: str) -> str:
     return f"{kind} {time.strftime('%Y-%m-%d')}"
 
 
-def _daemon_init():
-    threading.current_thread().daemon = True   # 审计报告 C3：退出不等在途网络调用
-
-
-_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bg",
-                           initializer=_daemon_init)
+# 审计报告 R1：不能用 initializer 设 daemon（CPython 禁止对活动线程改 daemon
+# 状态 → BrokenThreadPool，全部网络操作第一次就抛错）。closeEvent 统一收尾
+# （shutdown(wait=False, cancel_futures=True)）。
+_EXEC = ThreadPoolExecutor(max_workers=4)
 
 
 def wait_for(parent, fn, label: str = "请稍候…"):
