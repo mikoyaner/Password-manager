@@ -173,6 +173,18 @@ def _migrate_user_contact_columns(conn) -> None:
         log.warning("PWMGR_CONTACT_PEPPER 未设置：本次迁移的账号查重列未回填，"
                     "唯一性保护降级（可用 set_contact 重绑恢复）")
 
+    # 审计报告 S5：每次启动列出"有哈希但查重列缺失"的存量降级账号
+    # （历史缺陷写入/迁移冲突跳过的行），不限于本次迁移处理的行。
+    legacy = conn.execute(
+        "SELECT username FROM users WHERE "
+        "(email_hash IS NOT NULL AND email_uniq IS NULL) OR "
+        "(phone_hash IS NOT NULL AND phone_uniq IS NULL)"
+    ).fetchall()
+    if legacy:
+        names = ", ".join(r["username"] for r in legacy)
+        log.warning("以下账号联系方式查重列缺失（同邮箱/手机号可重复注册），"
+                    "请用 set_contact 重绑恢复唯一性保护：%s", names)
+
 
 # ===== 用户 =====
 
