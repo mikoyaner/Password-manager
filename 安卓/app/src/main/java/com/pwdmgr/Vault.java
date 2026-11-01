@@ -24,8 +24,9 @@ public class Vault {
     public String username = "";
     /** 密码库密码设定时刻(ms)：建库/改密时更新。纯元数据。 */
     public long pwdTime = 0;
-    /** 内容最后修改时刻(ms)：touch() 更新；PUT 成功后用服务器 upload_time 刷新。 */
-    public long modifiedAt = 0;
+    /** 内容最后修改时刻(ms)：touch() 更新；PUT 成功后用服务器 upload_time 刷新。
+     *  volatile：doPush 后台线程会写它（审计报告 B4 残留）。 */
+    public volatile long modifiedAt = 0;
     /** 展示标签 ≤30。 */
     public String label = null;
     /** 本地内容修改计数（不入编、不同步）：推送前后比对，判断期间是否又改过。
@@ -34,9 +35,6 @@ public class Vault {
 
     /** id -> record JSONObject */
     public final JSONObject records = new JSONObject();
-
-    /** Vault 级锁：records 的所有读写与 toJson/activeRecords 都在此锁内（B4）。 */
-    public final Object vaultLock = new Object();
 
     public Vault() {}
 

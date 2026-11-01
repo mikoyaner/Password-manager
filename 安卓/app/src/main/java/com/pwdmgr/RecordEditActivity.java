@@ -130,8 +130,9 @@ public class RecordEditActivity extends AppCompatActivity {
                 if (editId == null) v.add("login", t, u, un, p, null, n);
                 else v.update(editId, "login", t, u, un, p, null, n);
             }
+            VaultHolder.KeySalt ks = VaultHolder.get().getKeySalt();
             storage.saveVault(VaultHolder.get().getVid(), v,
-                    VaultHolder.get().getKey(), VaultHolder.get().getSalt(), true);
+                    ks.key, ks.salt, true);
             finish();
         } catch (Exception e) {
             toast("保存失败: " + e.getMessage());

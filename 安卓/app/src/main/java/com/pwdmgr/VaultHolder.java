@@ -78,7 +78,8 @@ public class VaultHolder {
     public void drop(String vid) {
         boolean empty;
         synchronized (lock) {
-            sessions.remove(vid);
+            Session s = sessions.remove(vid);
+            if (s != null) { wipe(s.key); wipe(s.salt); }
             if (vid != null && vid.equals(currentVid)) currentVid = null;
             empty = sessions.isEmpty();
         }
@@ -111,6 +112,30 @@ public class VaultHolder {
         String vid = currentVid;
         Session s = vid == null ? null : sessions.get(vid);
         return s == null ? null : s.salt.clone();
+    }
+
+    /** 不可变的 key/salt 快照（审计报告 B2 残留：分两次调用 getKey/getSalt，
+     *  中间可能发生改库密码——setCredentials 会同时换掉两者，拆开调用会拿到
+     *  错配对，写出的 vault.enc 头与密钥不绑定）。 */
+    public static class KeySalt {
+        public final byte[] key;
+        public final byte[] salt;
+
+        KeySalt(byte[] k, byte[] s) { key = k; salt = s; }
+    }
+
+    /** 同一锁内原子返回 key+salt 副本；未解锁返回 null。 */
+    public KeySalt getKeySalt() {
+        synchronized (lock) {
+            String vid = currentVid;
+            Session s = vid == null ? null : sessions.get(vid);
+            if (s == null) return null;
+            return new KeySalt(s.key.clone(), s.salt.clone());
+        }
+    }
+
+    private static void wipe(byte[] a) {
+        if (a != null) java.util.Arrays.fill(a, (byte) 0);
     }
 
     public void setPassword(String pw) {
@@ -148,9 +173,13 @@ public class VaultHolder {
     }
 
     public void clearAll() {
-        // 审计报告 B2：key/salt 视为不可变，getter 返回副本——这里只断引用，
-        // 不就地清零（后台在途任务持有的副本不受影响，避免写出零密钥库）
+        // 审计报告 B2 收尾：getter 返回副本后，清零内部数组是安全的
+        // （没有任何外部引用指向它们）；旧密钥即刻从内存消失，不再等 GC。
         synchronized (lock) {
+            for (Session s : sessions.values()) {
+                wipe(s.key);
+                wipe(s.salt);
+            }
             sessions.clear();
             currentVid = null;
         }

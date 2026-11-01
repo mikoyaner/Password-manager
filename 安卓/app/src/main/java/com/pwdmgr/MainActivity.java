@@ -187,7 +187,8 @@ public class MainActivity extends AppCompatActivity {
         VaultHolder h = VaultHolder.get();
         if (h.getVault() == null || h.getVid() == null) return;
         try {
-            storage.saveVault(h.getVid(), h.getVault(), h.getKey(), h.getSalt(), true);
+            VaultHolder.KeySalt ks = VaultHolder.get().getKeySalt();
+            storage.saveVault(h.getVid(), h.getVault(), ks.key, ks.salt, true);
         } catch (Exception e) {
             toast("保存失败: " + e.getMessage());
         }
@@ -299,8 +300,10 @@ public class MainActivity extends AppCompatActivity {
         // 一次性捕获，防止中途切库导致把 meta/密文写到别的 vid
         final String vid0 = vid();
         final Vault v0 = vault();
-        final byte[] key = VaultHolder.get().getKey();   // B2：副本，clearAll 不影响
-        final byte[] salt = VaultHolder.get().getSalt();
+        // B2 残留修复：一次性原子取 key/salt 快照（分两次调用中间可能被改密错配）
+        VaultHolder.KeySalt ks = VaultHolder.get().getKeySalt();
+        final byte[] key = ks == null ? null : ks.key;
+        final byte[] salt = ks == null ? null : ks.salt;
         if (vid0 == null || v0 == null) { toast("请先在首页打开一个库"); return; }
         // 审计报告 A4/A5：UI 线程一次性完成序列化+加密快照；后台零共享可变状态
         final byte[] blob;

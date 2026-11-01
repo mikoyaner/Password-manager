@@ -139,15 +139,36 @@ public class PwdMgrAutofillService extends AutofillService {
                     return;
                 }
                 Storage storage = new Storage(this);
-                synchronized (v.vaultLock) {
-                    if (!hasSameLogin(v, fUrl, fUser, fPass)) {
+                boolean dup;
+                byte[] blob = null;
+                long pwdTime = 0;
+                long modifiedAt = 0;
+                String label = null;
+                int recCount = 0;
+                // B4 残留修复：去重 + 新增 + 序列化 + 加密全部在 Vault 自己的
+                // 监视器锁内（与 UI 线程的 add/update 互斥），锁外只写文件；
+                // key/salt 用原子快照（B2 残留：避免两次调用间的错配对）
+                synchronized (v) {
+                    dup = hasSameLogin(v, fUrl, fUser, fPass);
+                    if (!dup) {
                         v.add(Vault.TYPE_LOGIN, fTitle,
                                 fUrl.isEmpty() ? null : fUrl,
                                 fUser.isEmpty() ? null : fUser,
                                 fPass, null, "自动捕获");
+                        VaultHolder.KeySalt ks = h.getKeySalt();
+                        blob = Crypto.encryptVault(v.toJson(), ks.key, ks.salt);
+                        pwdTime = v.pwdTime;
+                        modifiedAt = v.modifiedAt;
+                        label = v.label;
+                        recCount = v.activeRecords().size();
                     }
                 }
-                storage.saveVault(h.getVid(), v, h.getKey(), h.getSalt(), true);
+                if (dup) {
+                    callback.onSuccess();   // 重复凭据：无事可做
+                    return;
+                }
+                storage.saveVaultSnapshot(h.getVid(), blob, pwdTime, modifiedAt,
+                                          label, recCount, true);
                 storage.logSync(h.getVid(), "自动捕获保存 " + fTitle + " / " + fUser);
                 callback.onSuccess();
             } catch (Exception e) {
