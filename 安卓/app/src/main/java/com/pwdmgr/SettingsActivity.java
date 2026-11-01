@@ -114,12 +114,17 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void changeVaultPwd(String vid, VaultHolder holder, String newPwd) {
-        // Vault 是 UI 线程与后台线程共享对象：label/pwdTime/touch 只能在 UI 线程改，
-        // 后台只做 Argon2 派生与落盘，避免与界面并发读写 JSONObject。
+        // Vault 是 UI 线程与后台线程共享对象：label/pwdTime/touch 只能在 UI 线程改。
         // 审计 Q2/B4：序列化成功前【不】修改 v——此前先改内存再快照，派生/落盘
         // 失败时内存已变成"新时刻改过密"，下次 persist() 会把假时间戳写盘推云，
-        // §5.3 的跨天判断也被污染。现在新 pwdTime/label 只写进快照 JSON，
-        // 落盘成功后才在 UI 线程提交到内存对象；失败时内存与磁盘都不曾改动。
+        // §5.3 的跨天判断也被污染。新 pwdTime/label 只写进快照 JSON。
+        // 审计 R1+新3：写盘也必须在 UI 线程——上轮只把 setCredentials 挪进
+        // runOnUiThread 仍不够（saveVaultSnapshot 留在后台，persist() 可插在
+        // 它之后、切凭据之前，用旧 key 覆盖新密文）。现在"写盘 → 切凭据 →
+        // 提交内存"整体放在 UI 线程消息里，与 persist() 天然互斥、无窗口；
+        // 顺序是先写盘后切凭据，写盘失败时凭据与内存都不曾改动（原子写保证
+        // 磁盘要么旧文件完好要么新文件完整），无需回滚凭据。
+        // 后台线程只剩 newSalt/deriveKey/encryptVault——纯 CPU，不碰共享状态。
         final Vault v = holder.getVault();
         long now = System.currentTimeMillis();
         String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(now));
@@ -138,29 +143,33 @@ public class SettingsActivity extends AppCompatActivity {
         }
         toast("重新加密中…");
         new Thread(() -> {
+            byte[] salt;
+            byte[] key;
+            byte[] blob;
             try {
-                byte[] salt = Crypto.newSalt();
-                byte[] key = Crypto.deriveKey(newPwd, salt,
+                salt = Crypto.newSalt();
+                key = Crypto.deriveKey(newPwd, salt,
                         Crypto.ARGON_M, Crypto.ARGON_T, Crypto.ARGON_P);
-                byte[] blob = Crypto.encryptVault(plain, key, salt);
-                storage.saveVaultSnapshot(vid, blob, fNow, fNow, fLabel, recCount, true);
-                storage.logSync(vid, "改密码库密码 label=" + fLabel + " (未同步)");
-                // 落盘成功：此刻才在 UI 线程一次性切换会话凭据 + 提交内存对象。
-                // 审计 R1：setCredentials 若留在后台线程，落盘后到切凭据前的窗口里
-                // 用户编辑会触发 persist() 用旧 key/salt 覆盖刚写好的新密文
-                //（磁盘=旧密码、内存=新密码，下次新密码解锁失败）；UI 线程队列
-                // 串行化后该窗口不复存在。
-                runOnUiThread(() -> {
+                blob = Crypto.encryptVault(plain, key, salt);
+            } catch (Exception e) {
+                runOnUiThread(() -> toast("修改失败: " + e.getMessage()));
+                return;   // v/凭据/磁盘都不曾改动
+            }
+            runOnUiThread(() -> {
+                try {
+                    storage.saveVaultSnapshot(vid, blob, fNow, fNow, fLabel, recCount, true);
                     holder.setCredentials(newPwd, key, salt);
                     v.pwdTime = fNow;
                     v.label = fLabel;
                     v.touch();
+                    storage.logSync(vid, "改密码库密码 label=" + fLabel + " (未同步)");
                     toast("密码库密码已修改（记得重新推送以更新云端）");
-                });
-            } catch (Exception e) {
-                // 落盘失败：内存与磁盘都不曾改动（快照未被消费），无需回滚
-                runOnUiThread(() -> toast("修改失败: " + e.getMessage()));
-            }
+                } catch (Exception e) {
+                    // saveVaultSnapshot 原子写失败：磁盘旧文件完好，凭据与内存
+                    // 都不曾改动（写盘在切凭据之前），无需回滚
+                    toast("修改失败: " + e.getMessage());
+                }
+            });
         }).start();
     }
 

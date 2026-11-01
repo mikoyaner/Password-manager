@@ -1572,14 +1572,30 @@ class MainWindow(QMainWindow):
             new_label = today_label("改密")
         else:
             new_label = self.vault.label or today_label("初始")
+        # 审计新1/Q2 同源：写盘成功前内存只进"暂态"——写盘抛错（磁盘满/占用/
+        # 权限）时必须还原，否则内存带着新 pwd_time/label，下次 persist() 会把
+        # 假时间戳写盘推云，§5.3 的跨天判断也被污染。
+        # 桌面路径在 UI 线程同步执行（Argon2 会冻界面约 1 秒）——这正是本路径
+        # 没有安卓 R1 那种并发写窗口的原因，若将来改异步必须同时引入
+        # "写盘只在 UI 线程"的约束（见安卓 changeVaultPwd）。
+        old_pwd_time, old_label = self.vault.pwd_time, self.vault.label
+        old_modified = self.vault.modified_at
         self.vault.pwd_time = now
         self.vault.label = new_label
         self.vault.touch()
-        # 改密 = 新 salt + 新 key；旧 key 立即丢弃
-        salt = crypto.new_salt()
-        key = crypto.derive_key(new, salt, crypto.ARGON_M, crypto.ARGON_T, crypto.ARGON_P)
-        storage.save_vault(self.vid, self.vault, never_uploaded=True,
-                           key=key, salt=salt)
+        try:
+            # 改密 = 新 salt + 新 key；旧 key 立即丢弃
+            salt = crypto.new_salt()
+            key = crypto.derive_key(new, salt, crypto.ARGON_M, crypto.ARGON_T,
+                                    crypto.ARGON_P)
+            storage.save_vault(self.vid, self.vault, never_uploaded=True,
+                               key=key, salt=salt)
+        except Exception as e:
+            self.vault.pwd_time, self.vault.label = old_pwd_time, old_label
+            self.vault.modified_at = old_modified
+            self._refresh_header()
+            QMessageBox.critical(self, "失败", f"写入失败，已还原内存状态：{e}")
+            return
         self._key, self._salt = key, salt
         self.vault_pwd = new
         self._refresh_header()

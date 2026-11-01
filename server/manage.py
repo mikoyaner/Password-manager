@@ -42,7 +42,17 @@ def _list_users():
 
 
 
-def _delete_user(username: str):
+def _delete_user(username: str, *, confirm: bool = False):
+    """注销服务器账号。审计新2：级联删除该账号名下所有云端库（含最多 5 份
+    历史版本），不可恢复（本地库不受影响）——必须显式 --confirm 才执行，
+    与 /account DELETE 接口的 confirm:true 同一语义。"""
+    if not confirm:
+        print(f"危险操作：注销 {username} 将级联删除该账号所有云端密码库"
+              "（含最多 5 份历史版本），不可恢复（本地库不受影响）。",
+              file=sys.stderr)
+        print("确认执行请加 --confirm：manage.py delete_user "
+              f"{username} --confirm", file=sys.stderr)
+        sys.exit(1)
     store.init_db()
     store.delete_account(username)
     print(f"deleted: {username}")
@@ -94,13 +104,15 @@ def _set_contact(username: str, contact: str):
         store.set_contact_hash(username, kind, contact, pepper)
         print(f"已重绑 {username} 的找回{('邮箱' if kind == 'email' else '手机号')}")
     except _s.IntegrityError:
-        # 审计 R6：pepper 空窗期可能存在"同邮箱双账号"，重绑目标邮箱被
-        # 另一账号占用时管理员需要明确的下一步，而不是撞墙提示
+        # 审计 R6+新2：pepper 空窗期可能存在"同邮箱双账号"，重绑目标邮箱被
+        # 另一账号占用时管理员需要明确的下一步与代价说明，而不是撞墙提示
         print("该联系方式已被其他账号绑定（一个联系方式只绑一个账号）。",
               file=sys.stderr)
-        print("下一步：先确认保留哪个账号——用 manage.py list_users 核对，"
-              "manage.py delete_user <用户名> 注销另一个，再回到本命令重绑。",
-              file=sys.stderr)
+        print("下一步：先确认保留哪个账号——manage.py list_users 核对；注销"
+              "另一个请用 manage.py delete_user <用户名> --confirm（注意："
+              "注销会级联删除该账号所有云端库含 5 份历史，让对应用户先在"
+              "桌面端导出 CSV 备份或改用 reset_password 保留账号），"
+              "再回到本命令重绑。", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
         print(f"失败: {e}", file=sys.stderr); sys.exit(1)
@@ -119,7 +131,8 @@ def main():
     if cmd == "list_users":
         _list_users()
     elif cmd == "delete_user" and len(sys.argv) >= 3:
-        _delete_user(sys.argv[2])
+        _delete_user(sys.argv[2],
+                     confirm=(len(sys.argv) >= 4 and sys.argv[3] == "--confirm"))
     elif cmd == "reset_password" and len(sys.argv) >= 4:
         _reset_password(sys.argv[2], sys.argv[3])
     elif cmd == "forgot_reset" and len(sys.argv) >= 4:
