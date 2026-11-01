@@ -154,16 +154,21 @@ ensure_kv "$API_ENV" PWMGR_ADMIN_EMAIL PWMGR_SMS_HOOK_TOKEN PWMGR_CONTACT_PEPPER
 ensure_kv "$MAIL_ENV" PWMGR_IMAP_HOST PWMGR_IMAP_USER PWMGR_IMAP_PASS \
            PWMGR_SMTP_HOST PWMGR_SMTP_PORT PWMGR_SMTP_USER PWMGR_SMTP_PASS \
            PWMGR_CONTACT_PEPPER
-# 审计报告 N2：worker 与 API 必须持同一 pepper（sender_h 与 uniq 才同源）——
-# 以 api.env 的权威值覆盖 mail.env 中的空值
-_pepper=$(grep -E "^PWMGR_CONTACT_PEPPER=..*" "$API_ENV" | tail -1 | cut -d= -f2-)
-if [ -n "$_pepper" ]; then
-  sed -i "s|^PWMGR_CONTACT_PEPPER=.*|PWMGR_CONTACT_PEPPER=$_pepper|" "$MAIL_ENV"
-fi
 grep -qE "^PWMGR_SMS_HOOK_TOKEN=..*" "$API_ENV" || \
   sed -i "s/^PWMGR_SMS_HOOK_TOKEN=.*/PWMGR_SMS_HOOK_TOKEN=$(gen_hex)/" "$API_ENV"
 grep -qE "^PWMGR_CONTACT_PEPPER=..*" "$API_ENV" || \
   sed -i "s/^PWMGR_CONTACT_PEPPER=.*/PWMGR_CONTACT_PEPPER=$(gen_hex)/" "$API_ENV"
+# 审计报告 N2/S3：worker 与 API 必须持同一 pepper（sender_h 与 uniq 才同源）——
+# 以 api.env 的权威值覆盖 mail.env 中的空值。注意必须在上面"api.env 空值则生成"
+# 之后执行（审计 Q4）：否则老机器首次升级时 api.env 里 pepper 还是空行，
+# 读不到值、mail.env 同步不上，worker 要等第二次跑脚本才拿到 pepper。
+# 用"删行+追加"而不是 sed 替换：值里含 & | \ 时 sed 会截断（审计 Q4）。
+_pepper=$(grep -E "^PWMGR_CONTACT_PEPPER=..*" "$API_ENV" | tail -1 | cut -d= -f2-)
+if [ -n "$_pepper" ]; then
+  grep -vE "^PWMGR_CONTACT_PEPPER=" "$MAIL_ENV" > "$MAIL_ENV.tmp" \
+    && mv "$MAIL_ENV.tmp" "$MAIL_ENV"
+  echo "PWMGR_CONTACT_PEPPER=$_pepper" >> "$MAIL_ENV"
+fi
 chown root:pwmanager "$API_ENV"; chmod 640 "$API_ENV"
 chown root:root "$MAIL_ENV"; chmod 600 "$MAIL_ENV"
 

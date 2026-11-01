@@ -116,28 +116,31 @@ public class SettingsActivity extends AppCompatActivity {
     private void changeVaultPwd(String vid, VaultHolder holder, String newPwd) {
         // Vault 是 UI 线程与后台线程共享对象：label/pwdTime/touch 只能在 UI 线程改，
         // 后台只做 Argon2 派生与落盘，避免与界面并发读写 JSONObject。
+        // 审计 Q2/B4：序列化成功前【不】修改 v——此前先改内存再快照，派生/落盘
+        // 失败时内存已变成"新时刻改过密"，下次 persist() 会把假时间戳写盘推云，
+        // §5.3 的跨天判断也被污染。现在新 pwdTime/label 只写进快照 JSON，
+        // 落盘成功后才在 UI 线程提交到内存对象；失败时内存与磁盘都不曾改动。
         final Vault v = holder.getVault();
         long now = System.currentTimeMillis();
         String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(now));
         String oldDay = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date(v.pwdTime));
-        final long oldPwdTime = v.pwdTime;
-        final String oldLabel = v.label;
-        if (!today.equals(oldDay)) v.label = "改密 " + today;   // §5.3：跨天才换 label
-        v.pwdTime = now;
-        v.touch();
-        // 审计报告 B4 收尾：UI 线程先做序列化+加密快照（含 Argon2 也在后台前的
-        // 锁外完成），后台只写文件与 meta——零共享可变状态
+        final long fNow = now;
+        final String fLabel = today.equals(oldDay) ? v.label : "改密 " + today;  // §5.3：跨天才换 label
         final byte[] plain;
         final int recCount;
         try {
-            plain = v.toJson();
+            byte[] current = v.toJson();
+            JSONObject jo = new JSONObject(
+                    new String(current, java.nio.charset.StandardCharsets.UTF_8));
+            jo.put("pwd_time", fNow);
+            jo.put("modified_at", fNow);
+            jo.put("label", fLabel);
+            plain = jo.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
             recCount = v.activeRecords().size();
         } catch (Exception e) {
             toast("序列化失败: " + e.getMessage());
-            return;
+            return;   // v 未被改动，无需回滚
         }
-        final long fNow = now;
-        final String fLabel = v.label;
         toast("重新加密中…");
         new Thread(() -> {
             try {
@@ -148,7 +151,13 @@ public class SettingsActivity extends AppCompatActivity {
                 storage.saveVaultSnapshot(vid, blob, fNow, fNow, fLabel, recCount, true);
                 holder.setCredentials(newPwd, key, salt);
                 storage.logSync(vid, "改密码库密码 label=" + fLabel + " (未同步)");
-                runOnUiThread(() -> toast("密码库密码已修改（记得重新推送以更新云端）"));
+                // 落盘成功：此刻才把新状态提交到内存共享对象（UI 线程）
+                runOnUiThread(() -> {
+                    v.pwdTime = fNow;
+                    v.label = fLabel;
+                    v.touch();
+                    toast("密码库密码已修改（记得重新推送以更新云端）");
+                });
             } catch (Exception e) {
                 // 落盘失败：内存与磁盘都不曾改动（快照未被消费），无需回滚
                 runOnUiThread(() -> toast("修改失败: " + e.getMessage()));

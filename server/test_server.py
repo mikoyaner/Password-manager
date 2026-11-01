@@ -445,6 +445,44 @@ def run():
     _imaplib.IMAP4_SSL = real_imap
     _smtplib.SMTP_SSL = real_smtp
 
+    # 17. 查重列语义统一（审计 Q1/N1）：pepper 为空 → uniq 写 NULL（与迁移一致），
+    #     不再写"空密钥 HMAC"；S5 的 email_uniq IS NULL 判据因此能抓到这些行。
+    import sqlite3 as _s3
+
+    def _uniq_of(user):
+        with _s3.connect(os.environ["PWMGR_DB"]) as _conn:
+            row = _conn.execute(
+                "SELECT email_uniq FROM users WHERE username = ?", (user,)
+            ).fetchone()
+        return row[0] if row else None
+
+    _pepper_saved = os.environ.pop("PWMGR_CONTACT_PEPPER")   # 场景 A：无 pepper 注册
+    r = _reg(c, "nopepper1", "password123")
+    assert r.status_code == 200, r.text
+    assert _uniq_of("nopepper1") is None, "pepper 为空时注册 uniq 必须是 NULL"
+
+    r = _reg(c, "nopepper2", "password123", email="same@example.com")
+    assert r.status_code == 200, r.text
+    assert _uniq_of("nopepper2") is None
+    os.environ["PWMGR_CONTACT_PEPPER"] = "test-pepper"       # 场景 B：pepper 就绪
+
+    r = _reg(c, "withpepper1", "password123", email="same@example.com")
+    assert r.status_code == 200, r.text
+    u1 = _uniq_of("withpepper1")
+    assert u1 is not None and u1 != "", "pepper 就绪后注册 uniq 必须是真实 HMAC"
+
+    r = _reg(c, "withpepper2", "password123", email="same@example.com")
+    assert r.status_code == 409, "同 pepper 同邮箱必须 409"
+
+    # 场景 D：set_contact 在 pepper 为空时也写 NULL
+    import manage as _mg
+    os.environ.pop("PWMGR_CONTACT_PEPPER")
+    _mg._set_contact("withpepper1", "rebind@example.com")
+    assert _uniq_of("withpepper1") is None, "pepper 为空时 set_contact 必须写 NULL"
+    os.environ["PWMGR_CONTACT_PEPPER"] = "test-pepper"
+    _mg._set_contact("withpepper1", "rebind2@example.com")
+    assert _uniq_of("withpepper1") is not None, "pepper 就绪后 set_contact 必须写真实 HMAC"
+
     print("server v2.8 e2e: all ok")
 
 

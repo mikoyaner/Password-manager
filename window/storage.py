@@ -149,10 +149,15 @@ def next_vid() -> str:
 
 
 def list_vaults() -> list[dict]:
-    """返回每个库的 meta（含 vid），按编号数值升序。缺 meta 的目录以 {vid} 兜底。"""
+    """返回每个库的 meta（含 vid），按编号数值升序。缺 meta 的目录以 {vid} 兜底。
+
+    审计 Q3：只认有 vault.enc 的目录——没有库文件的目录是残留垃圾
+    （与安卓端 Storage.listVaults 行为对齐），不当作可打开的库列出。
+    """
     root = vaults_root()
     entries = [n for n in os.listdir(root) if n.isdigit()
-               and os.path.isdir(os.path.join(root, n))]
+               and os.path.isdir(os.path.join(root, n))
+               and os.path.exists(os.path.join(root, n, "vault.enc"))]
     entries.sort(key=int)
     out: list[dict] = []
     for vid in entries:
@@ -217,27 +222,34 @@ def create_vault(password: str, *, last_account: str = "") -> tuple[str, vault_m
     for _ in range(100):
         candidate = next_vid()
         try:
-            os.makedirs(os.path.join(vaults_root(), candidate))
+            dir_ = os.path.join(vaults_root(), candidate)
+            os.makedirs(dir_)
             vid = candidate
             break
         except FileExistsError:
             continue
     else:
         raise RuntimeError("无法分配可用的库编号（连续冲突）")
-    now = int(time.time() * 1000)
-    label = f"初始 {time.strftime('%Y-%m-%d', time.localtime(now / 1000))}"
-    v = vault_mod.Vault(username="", pwd_time=now, modified_at=now, label=label)
-    crypto.encrypt_to_file(vault_path(vid), v.to_json(), password)
-    save_meta(vid, {
-        "vid": vid,
-        "pwd_time": now,
-        "modified_at": now,
-        "label": label,
-        "never_uploaded": True,
-        "last_account": last_account,
-        "record_count": 0,
-        "created_at": now,
-    })
+    try:
+        now = int(time.time() * 1000)
+        label = f"初始 {time.strftime('%Y-%m-%d', time.localtime(now / 1000))}"
+        v = vault_mod.Vault(username="", pwd_time=now, modified_at=now, label=label)
+        crypto.encrypt_to_file(vault_path(vid), v.to_json(), password)
+        save_meta(vid, {
+            "vid": vid,
+            "pwd_time": now,
+            "modified_at": now,
+            "label": label,
+            "never_uploaded": True,
+            "last_account": last_account,
+            "record_count": 0,
+            "created_at": now,
+        })
+    except Exception:
+        # 审计 Q3：失败清理自建目录——否则留下无 vault.enc 的空目录，
+        # list_vaults 会把它当"幽灵库"列出来（目录编号已被占用还撞号）
+        shutil.rmtree(os.path.join(vaults_root(), vid), ignore_errors=True)
+        raise
     return vid, v
 
 

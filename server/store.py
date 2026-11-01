@@ -361,6 +361,12 @@ def set_contact_hash(username: str, kind: str, value: str,
     """
     import contacts
 
+    # 审计 Q1/N1：pepper 为空时 uniq 写 NULL（与迁移/注册路径同语义），
+    # 不写"空密钥 HMAC"——那种值无法事后重算检测，S5 清单抓不到
+    if not pepper:
+        log.warning("PWMGR_CONTACT_PEPPER 未配置：user=%s 的 %s 查重列写 NULL"
+                    "（唯一性保护降级）", username, kind)
+
     with _lock, _connect() as conn:
         row = conn.execute(
             "SELECT contact_salt FROM users WHERE username = ?",
@@ -370,7 +376,7 @@ def set_contact_hash(username: str, kind: str, value: str,
             raise ValueError(f"no user or no contact salt: {username}")
         salt = bytes(row["contact_salt"])
         h = contacts.contact_hash(salt, kind, value)
-        u = contacts.contact_uniq(pepper, kind, value)
+        u = contacts.contact_uniq(pepper, kind, value) if pepper else None
         col, ucol = ("email_hash", "email_uniq") if kind == "email" else \
                     ("phone_hash", "phone_uniq")
         # 管理员重绑视为重新起算：清除 24h 找回节流标记

@@ -60,3 +60,6 @@ worklog.md
 server/forgot_pending.json
 server/*.scan.json
 server/forgot.log
+server/forgot.log.lock
+server/*.clean.state
+server/forgot_resend.state

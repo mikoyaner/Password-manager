@@ -213,13 +213,22 @@ def register(req: RegisterReq, request: Request):
 
     # 隐私要求：联系方式只存加盐哈希（contacts.py），明文校验完即丢弃。
     # 另存 HMAC 查找哈希（pepper 不进库）用于注册查重：一个联系方式只绑一个账号。
+    # 审计 Q1/N1：pepper 为空时 uniq 必须写 NULL（与迁移路径 store.py 同语义）。
+    # 此前空 pepper 会写"空密钥 HMAC"——与配好 pepper 后的注册互查不到冲突
+    # （同邮箱可绑多账号），且该值既非 NULL 也无法用新 pepper 重算比对，
+    # S5 的启动清单天生检测不到。写 NULL 则唯一性显式降级 + S5 可见 + 可重绑修复。
     pepper = os.environ.get("PWMGR_CONTACT_PEPPER", "")
+    if not pepper and (email or phone):
+        log.warning("PWMGR_CONTACT_PEPPER 未配置：注册查重列写 NULL（唯一性保护降级），"
+                    "配置 pepper 后请用 set_contact 重绑恢复")
     contact_salt = contacts.new_salt()
     try:
         email_hash = contacts.contact_hash(contact_salt, "email", email) if email else None
         phone_hash = contacts.contact_hash(contact_salt, "sms", phone) if phone else None
-        email_uniq = contacts.contact_uniq(pepper, "email", email) if email else None
-        phone_uniq = contacts.contact_uniq(pepper, "sms", phone) if phone else None
+        email_uniq = (contacts.contact_uniq(pepper, "email", email)
+                      if email and pepper else None)
+        phone_uniq = (contacts.contact_uniq(pepper, "sms", phone)
+                      if phone and pepper else None)
     except ValueError:
         raise HTTPException(status_code=400, detail={"error": "invalid_contact"})
     if store.contact_taken(email_uniq, phone_uniq):
