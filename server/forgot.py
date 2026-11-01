@@ -196,7 +196,11 @@ def _load_pending_nolock() -> dict:
     try:
         with open(_pending_path(), encoding="utf-8") as f:
             return json.load(f)
+    except FileNotFoundError:
+        return {}   # 首次运行无待确认文件是正常态
     except Exception:
+        # 文件损坏不能静默：确认码会"凭空消失"，管理员必须能看到原因
+        log.exception("forgot_pending.json 损坏，按空状态继续")
         return {}
 
 
