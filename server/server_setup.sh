@@ -152,7 +152,14 @@ fi
 ensure_kv() { file=$1; shift; for k in "$@"; do grep -q "^$k=" "$file" || echo "$k=" >> "$file"; done; }
 ensure_kv "$API_ENV" PWMGR_ADMIN_EMAIL PWMGR_SMS_HOOK_TOKEN PWMGR_CONTACT_PEPPER PWMGR_ADMIN_SMS_HINT
 ensure_kv "$MAIL_ENV" PWMGR_IMAP_HOST PWMGR_IMAP_USER PWMGR_IMAP_PASS \
-           PWMGR_SMTP_HOST PWMGR_SMTP_PORT PWMGR_SMTP_USER PWMGR_SMTP_PASS
+           PWMGR_SMTP_HOST PWMGR_SMTP_PORT PWMGR_SMTP_USER PWMGR_SMTP_PASS \
+           PWMGR_CONTACT_PEPPER
+# 审计报告 N2：worker 与 API 必须持同一 pepper（sender_h 与 uniq 才同源）——
+# 以 api.env 的权威值覆盖 mail.env 中的空值
+_pepper=$(grep -E "^PWMGR_CONTACT_PEPPER=..*" "$API_ENV" | tail -1 | cut -d= -f2-)
+if [ -n "$_pepper" ]; then
+  sed -i "s|^PWMGR_CONTACT_PEPPER=.*|PWMGR_CONTACT_PEPPER=$_pepper|" "$MAIL_ENV"
+fi
 grep -qE "^PWMGR_SMS_HOOK_TOKEN=..*" "$API_ENV" || \
   sed -i "s/^PWMGR_SMS_HOOK_TOKEN=.*/PWMGR_SMS_HOOK_TOKEN=$(gen_hex)/" "$API_ENV"
 grep -qE "^PWMGR_CONTACT_PEPPER=..*" "$API_ENV" || \

@@ -74,7 +74,12 @@ def today_label(kind: str) -> str:
     return f"{kind} {time.strftime('%Y-%m-%d')}"
 
 
-_EXEC = ThreadPoolExecutor(max_workers=4)
+def _daemon_init():
+    threading.current_thread().daemon = True   # 审计报告 C3：退出不等在途网络调用
+
+
+_EXEC = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bg",
+                           initializer=_daemon_init)
 
 
 def wait_for(parent, fn, label: str = "请稍候…"):
@@ -1382,6 +1387,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.clip_timer.stop()
         self._clear_clipboard()
+        # 审计报告 C3：退出时取消排队任务、不等待在途网络调用（daemon 线程随后终止）
+        _EXEC.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
     # ---- 同步 ----

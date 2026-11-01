@@ -221,13 +221,13 @@ def _process_message(msg, raw: bytes) -> tuple[str, str]:
                     "设置你自己的新密码。\n（本邮件由系统自动发送）")
                 if sent:
                     forgot.commit_reset(payload)
-                    forgot.audit("RESET_DELIVERED", user=payload["user"],
+                    forgot.audit("RESET_DELIVERED", user=payload["commit"]["user"],
                                  channel="email", sender=sender,
                                  detail="temp password emailed and committed")
                     log.info("two-step reset completed")
                     return "handled", sender
                 log.warning("temp delivery failed: token retained, will retry")
-                forgot.audit("DELIVER_FAILED", user=payload["user"],
+                forgot.audit("DELIVER_FAILED", user=payload["commit"]["user"],
                              channel="email", sender=sender,
                              detail="temp mail delivery failed, token retained, will retry")
                 return "retry", sender
@@ -308,7 +308,7 @@ def main() -> int:
         return 0
     if not os.environ.get("PWMGR_CONTACT_PEPPER"):
         # 审计报告 A5：确认码发件人哈希需要 pepper，缺失时拒绝该功能而不是降级
-        log.warning("PWMGR_CONTACT_PEPPER 未配置（api.env）："
+        log.warning("PWMGR_CONTACT_PEPPER 未配置（mail.env）："
                     "确认码发件人哈希无法安全计算，本轮跳过处理")
         return 0
 

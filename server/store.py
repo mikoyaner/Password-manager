@@ -151,12 +151,24 @@ def _migrate_user_contact_columns(conn) -> None:
                               if pepper else None)
             except ValueError:
                 log.warning("迁移跳过无效手机号 user=%s", r["username"])
-        conn.execute(
-            "UPDATE users SET contact_salt=?, email_hash=?, phone_hash=?, "
-            "email_uniq=?, phone_uniq=?, email='', phone='' WHERE username=?",
-            (csalt, email_hash, phone_hash, email_uniq, phone_uniq,
-             r["username"]),
-        )
+        try:
+            conn.execute(
+                "UPDATE users SET contact_salt=?, email_hash=?, phone_hash=?, "
+                "email_uniq=?, phone_uniq=?, email='', phone='' WHERE username=?",
+                (csalt, email_hash, phone_hash, email_uniq, phone_uniq,
+                 r["username"]),
+            )
+        except sqlite3.IntegrityError:
+            # 审计报告 A6：两个老账号共用同一邮箱/手机号时，查重列唯一索引会
+            # 冲突——跳过该行的 uniq 回填（哈希列照常写入），保证服务能启动；
+            # 管理员随后用 set_contact 重绑即可恢复唯一性保护。
+            log.warning("迁移查重列冲突 user=%s：uniq 留空，"
+                        "请用 set_contact 重绑恢复唯一性保护", r["username"])
+            conn.execute(
+                "UPDATE users SET contact_salt=?, email_hash=?, phone_hash=?, "
+                "email='', phone='' WHERE username=?",
+                (csalt, email_hash, phone_hash, r["username"]),
+            )
     if not pepper and rows:
         log.warning("PWMGR_CONTACT_PEPPER 未设置：本次迁移的账号查重列未回填，"
                     "唯一性保护降级（可用 set_contact 重绑恢复）")

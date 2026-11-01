@@ -120,7 +120,7 @@ def encrypt_to_file(path: str, plaintext: bytes, password: str | None = None,
     else:
         blob = encrypt_vault(plaintext, password)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = path + f".{os.getpid()}.tmp"
     with open(tmp, "wb") as f:
         f.write(blob)
         f.flush()

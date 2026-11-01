@@ -128,7 +128,7 @@ def save_config(cfg: dict) -> None:
 
 def _atomic_write_text(path: str, text: str) -> None:
     """原子写文本：tmp + fsync + replace，避免半截 JSON 静默回落到默认配置。"""
-    tmp = path + ".tmp"
+    tmp = path + f".{os.getpid()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
         f.flush()
@@ -187,7 +187,7 @@ def vault_exists(vid: str) -> bool:
 def write_vault_bytes(vid: str, blob: bytes) -> None:
     """把一份完整 vault.enc 原子落盘（tmp + fsync + replace），永不出现半截文件。"""
     target = vault_path(vid)
-    tmp = target + ".tmp"
+    tmp = target + f".{os.getpid()}.tmp"
     with open(tmp, "wb") as f:
         f.write(blob)
         f.flush()
