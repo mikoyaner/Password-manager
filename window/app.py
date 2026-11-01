@@ -1695,7 +1695,9 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(
                 self, "确认导入",
                 f"校验通过：{len(records)} 行符合格式。\n"
-                "将以**新增**方式导入当前本地库（不会覆盖已有记录）。继续？",
+                "将以**新增**方式导入当前本地库（不会覆盖已有记录）。\n"
+                "导入后会自动合并**完全相同**的重复条目——包括 CSV 内部的重复，"
+                "以及与库内既有记录完全相同的行。继续？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
             self._set_status("已取消")

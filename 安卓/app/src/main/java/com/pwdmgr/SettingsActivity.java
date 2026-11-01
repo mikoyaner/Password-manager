@@ -129,13 +129,8 @@ public class SettingsActivity extends AppCompatActivity {
         final byte[] plain;
         final int recCount;
         try {
-            byte[] current = v.toJson();
-            JSONObject jo = new JSONObject(
-                    new String(current, java.nio.charset.StandardCharsets.UTF_8));
-            jo.put("pwd_time", fNow);
-            jo.put("modified_at", fNow);
-            jo.put("label", fLabel);
-            plain = jo.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            // 审计 R2：顶层字段名知识在 Vault.toJsonWith 一处，不再手写 JSON 键
+            plain = v.toJsonWith(fNow, fNow, fLabel);
             recCount = v.activeRecords().size();
         } catch (Exception e) {
             toast("序列化失败: " + e.getMessage());
@@ -149,10 +144,14 @@ public class SettingsActivity extends AppCompatActivity {
                         Crypto.ARGON_M, Crypto.ARGON_T, Crypto.ARGON_P);
                 byte[] blob = Crypto.encryptVault(plain, key, salt);
                 storage.saveVaultSnapshot(vid, blob, fNow, fNow, fLabel, recCount, true);
-                holder.setCredentials(newPwd, key, salt);
                 storage.logSync(vid, "改密码库密码 label=" + fLabel + " (未同步)");
-                // 落盘成功：此刻才把新状态提交到内存共享对象（UI 线程）
+                // 落盘成功：此刻才在 UI 线程一次性切换会话凭据 + 提交内存对象。
+                // 审计 R1：setCredentials 若留在后台线程，落盘后到切凭据前的窗口里
+                // 用户编辑会触发 persist() 用旧 key/salt 覆盖刚写好的新密文
+                //（磁盘=旧密码、内存=新密码，下次新密码解锁失败）；UI 线程队列
+                // 串行化后该窗口不复存在。
                 runOnUiThread(() -> {
+                    holder.setCredentials(newPwd, key, salt);
                     v.pwdTime = fNow;
                     v.label = fLabel;
                     v.touch();

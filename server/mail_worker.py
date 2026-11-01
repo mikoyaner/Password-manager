@@ -84,11 +84,21 @@ def _load_state() -> tuple[dict, dict]:
 
 
 def _save_state(seen: dict, retries: dict) -> None:
-    """审计报告 N3：按时间淘汰（保留最近 _SCAN_STATE_MAX 条），不再按字典序。"""
+    """审计报告 N3：seen 按时间戳淘汰（保留最近 _SCAN_STATE_MAX 条），不再按字典序。
+
+    retries 不做"插入序挤掉"式淘汰（审计 R5）：正常只含处理中/待重试邮件，
+    远小于上限；真超限说明状态异常——整体重置比挤掉最早条目更安全且等价
+    （两种方式都会让对应邮件从 1 重新计数，只延迟放弃判定、不丢邮件），
+    但重置有告警可见。
+    """
+    if len(retries) > _SCAN_STATE_MAX:
+        log.warning("retries 条目异常增多（%d > %d），已整体重置（重新计数只会"
+                    "延迟放弃判定，不丢邮件）", len(retries), _SCAN_STATE_MAX)
+        retries.clear()   # 原地清空：调用方 main() 持有同一 dict，必须同步可见
     keep = dict(sorted(seen.items(), key=lambda kv: kv[1])[-_SCAN_STATE_MAX:])
     forgot.write_json_atomic(_state_path(), {
         "seen_ids": keep,
-        "retries": {k: v for k, v in list(retries.items())[-_SCAN_STATE_MAX:]},
+        "retries": retries,
     })
 
 
@@ -410,6 +420,9 @@ def main() -> int:
                 retries.pop(mid, None)
                 processed += 1
                 if processed >= _MAX_PROCESSED_PER_RUN:
+                    # 审计 R5：cap 触发 break 不走分支尾部的 _save_state，
+                    # 本轮 seen/retries 变更必须先落盘
+                    _save_state(seen, retries)
                     log.info("per-run processing cap reached (%d)", processed)
                     break
             else:   # unrelated：保持未读，仅记入去重状态

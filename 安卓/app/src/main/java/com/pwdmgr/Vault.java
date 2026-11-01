@@ -43,14 +43,22 @@ public class Vault {
     public static String newId() { return UUID.randomUUID().toString(); }
 
     // ---- 序列化 ----
-    public synchronized byte[] toJson() throws JSONException {
+    /** 指定 pwdTime/modifiedAt/label 的序列化（改密快照用）：顶层字段名只在这一处。
+     *  label 为 null 时必须写 JSONObject.NULL——org.json 的 put(key, (String)null)
+     *  语义是"移除键"而非写 null（from_json 靠 isNull("label") 读回 null）。 */
+    public synchronized byte[] toJsonWith(long newPwdTime, long newModifiedAt,
+                                          String newLabel) throws JSONException {
         JSONObject root = new JSONObject();
         root.put("username", username);
-        root.put("pwd_time", pwdTime);
-        root.put("modified_at", modifiedAt);
-        root.put("label", label == null ? JSONObject.NULL : label);
+        root.put("pwd_time", newPwdTime);
+        root.put("modified_at", newModifiedAt);
+        root.put("label", newLabel == null ? JSONObject.NULL : newLabel);
         root.put("records", records);
         return root.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    public synchronized byte[] toJson() throws JSONException {
+        return toJsonWith(pwdTime, modifiedAt, label);
     }
 
     public static Vault fromJson(byte[] data) throws JSONException {

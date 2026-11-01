@@ -94,8 +94,14 @@ def _set_contact(username: str, contact: str):
         store.set_contact_hash(username, kind, contact, pepper)
         print(f"已重绑 {username} 的找回{('邮箱' if kind == 'email' else '手机号')}")
     except _s.IntegrityError:
-        print("该联系方式已被其他账号绑定（一个联系方式只绑一个账号）",
-              file=sys.stderr); sys.exit(1)
+        # 审计 R6：pepper 空窗期可能存在"同邮箱双账号"，重绑目标邮箱被
+        # 另一账号占用时管理员需要明确的下一步，而不是撞墙提示
+        print("该联系方式已被其他账号绑定（一个联系方式只绑一个账号）。",
+              file=sys.stderr)
+        print("下一步：先确认保留哪个账号——用 manage.py list_users 核对，"
+              "manage.py delete_user <用户名> 注销另一个，再回到本命令重绑。",
+              file=sys.stderr)
+        sys.exit(1)
     except ValueError as e:
         print(f"失败: {e}", file=sys.stderr); sys.exit(1)
 
