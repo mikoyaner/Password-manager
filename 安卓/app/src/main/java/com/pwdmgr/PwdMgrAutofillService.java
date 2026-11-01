@@ -133,8 +133,10 @@ public class PwdMgrAutofillService extends AutofillService {
         final String fPass = pass;
         saveExecutor.execute(() -> {
             try {
-                Vault v = h.getVault();
-                if (v == null) {   // 排队期间会话可能被清
+                // 审计报告 S1：同锁内一次取整份会话快照——executor 排队期间用户
+                // 切库/换会话，也不会出现"A 库内容用 B 库密钥加密写进 B 库"的串库
+                VaultHolder.Snapshot snap = h.snapshot();
+                if (snap == null || snap.vault == null) {
                     callback.onFailure("密码管理器未解锁");
                     return;
                 }
@@ -146,30 +148,34 @@ public class PwdMgrAutofillService extends AutofillService {
                 String label = null;
                 int recCount = 0;
                 // B4 残留修复：去重 + 新增 + 序列化 + 加密全部在 Vault 自己的
-                // 监视器锁内（与 UI 线程的 add/update 互斥），锁外只写文件；
-                // key/salt 用原子快照（B2 残留：避免两次调用间的错配对）
-                synchronized (v) {
-                    dup = hasSameLogin(v, fUrl, fUser, fPass);
+                // 监视器锁内（与 UI 线程的 add/update 互斥），锁外只写文件
+                synchronized (snap.vault) {
+                    dup = hasSameLogin(snap.vault, fUrl, fUser, fPass);
                     if (!dup) {
-                        v.add(Vault.TYPE_LOGIN, fTitle,
+                        snap.vault.add(Vault.TYPE_LOGIN, fTitle,
                                 fUrl.isEmpty() ? null : fUrl,
                                 fUser.isEmpty() ? null : fUser,
                                 fPass, null, "自动捕获");
-                        VaultHolder.KeySalt ks = h.getKeySalt();
-                        blob = Crypto.encryptVault(v.toJson(), ks.key, ks.salt);
-                        pwdTime = v.pwdTime;
-                        modifiedAt = v.modifiedAt;
-                        label = v.label;
-                        recCount = v.activeRecords().size();
+                        blob = Crypto.encryptVault(snap.vault.toJson(),
+                                                   snap.key, snap.salt);
+                        pwdTime = snap.vault.pwdTime;
+                        modifiedAt = snap.vault.modifiedAt;
+                        label = snap.vault.label;
+                        recCount = snap.vault.activeRecords().size();
                     }
                 }
                 if (dup) {
                     callback.onSuccess();   // 重复凭据：无事可做
                     return;
                 }
-                storage.saveVaultSnapshot(h.getVid(), blob, pwdTime, modifiedAt,
+                // 写盘前确认该库仍是当前解锁的库（S1）
+                if (!snap.vid.equals(h.getVid())) {
+                    callback.onFailure("会话已切换，请重新触发自动保存");
+                    return;
+                }
+                storage.saveVaultSnapshot(snap.vid, blob, pwdTime, modifiedAt,
                                           label, recCount, true);
-                storage.logSync(h.getVid(), "自动捕获保存 " + fTitle + " / " + fUser);
+                storage.logSync(snap.vid, "自动捕获保存 " + fTitle + " / " + fUser);
                 callback.onSuccess();
             } catch (Exception e) {
                 callback.onFailure("保存失败: " + e.getMessage());

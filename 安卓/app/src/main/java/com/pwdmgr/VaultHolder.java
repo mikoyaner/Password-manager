@@ -134,6 +134,29 @@ public class VaultHolder {
         }
     }
 
+    /** 不可变的会话快照（审计报告 S1：自动填充在单线程 executor 排队期间，
+     *  用户可能切库/换会话——必须全程使用同一份 vid+vault+key+salt）。 */
+    public static class Snapshot {
+        public final String vid;
+        public final Vault vault;
+        public final byte[] key;
+        public final byte[] salt;
+
+        Snapshot(String vid, Vault v, byte[] k, byte[] s) {
+            vid = vid; vault = v; key = k; salt = s;
+        }
+    }
+
+    /** 同一锁内原子返回整份会话快照（vid+vault+key+salt）；未解锁返回 null。 */
+    public Snapshot snapshot() {
+        synchronized (lock) {
+            String vid = currentVid;
+            Session s = vid == null ? null : sessions.get(vid);
+            if (s == null) return null;
+            return new Snapshot(vid, s.vault, s.key.clone(), s.salt.clone());
+        }
+    }
+
     private static void wipe(byte[] a) {
         if (a != null) java.util.Arrays.fill(a, (byte) 0);
     }

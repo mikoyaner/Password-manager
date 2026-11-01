@@ -38,8 +38,9 @@ if getattr(sys, "frozen", False):
             break
 
 try:
-    from PyQt6.QtCore import Qt, QTimer
-    from PyQt6.QtGui import QAction, QGuiApplication, QLockFile
+    # 审计更正：QLockFile 在 Qt5/Qt6 均属 QtCore（此前误放 QtGui 分支）
+    from PyQt6.QtCore import QLockFile, Qt, QTimer
+    from PyQt6.QtGui import QAction, QGuiApplication
     from PyQt6.QtWidgets import (
         QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
         QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,

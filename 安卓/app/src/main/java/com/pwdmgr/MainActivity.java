@@ -186,8 +186,14 @@ public class MainActivity extends AppCompatActivity {
     private void persist() {
         VaultHolder h = VaultHolder.get();
         if (h.getVault() == null || h.getVid() == null) return;
+        // 审计报告 S6：会话刚被清（ks == null）时不能落盘——静默失败会让用户
+        // 刚录入的凭据只在内存里，重新解锁后消失；明确提示让用户重试
+        VaultHolder.KeySalt ks = h.getKeySalt();
+        if (ks == null) {
+            runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) toast("会话已锁定，请重新解锁后重试保存"); });
+            return;
+        }
         try {
-            VaultHolder.KeySalt ks = VaultHolder.get().getKeySalt();
             storage.saveVault(h.getVid(), h.getVault(), ks.key, ks.salt, true);
         } catch (Exception e) {
             toast("保存失败: " + e.getMessage());

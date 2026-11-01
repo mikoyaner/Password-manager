@@ -131,6 +131,12 @@ public class RecordEditActivity extends AppCompatActivity {
                 else v.update(editId, "login", t, u, un, p, null, n);
             }
             VaultHolder.KeySalt ks = VaultHolder.get().getKeySalt();
+            if (ks == null) {
+                // 审计报告 S6：会话刚被清时明确提示——输入保留在输入框里，
+                // 重新解锁后用户可直接再点保存
+                toast("会话已锁定，请重新解锁后重试保存");
+                return;
+            }
             storage.saveVault(VaultHolder.get().getVid(), v,
                     ks.key, ks.salt, true);
             finish();

@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import html as _html
 import imaplib
+import json
 import logging
 import os
 import re
@@ -55,7 +56,7 @@ _FRESH_SECONDS = 60 * 60
 _HTML_TAG = re.compile(r"<[^>]+>")
 _MAX_PROCESSED_PER_RUN = 10   # 每轮最多处理的找回邮件数（Argon2 放大防护，P1-8）
 _SCAN_STATE_MAX = 500         # 状态文件上限（seen_ids + 重试计数）
-_RETRY_GIVEUP_ROUNDS = 3      # 同一封邮件连续投递失败 3 轮后放弃（A1）
+_RETRY_GIVEUP_ROUNDS = 25     # 审计报告 S2：约 25 分钟（60s/轮），放宽以免 SMTP 抖动永久吞掉找回申请
 
 
 def _state_path() -> str:
@@ -68,6 +69,8 @@ def _load_state() -> tuple[set, dict]:
             d = json.load(f)
         return set(d.get("seen_ids", [])), dict(d.get("retries", {}))
     except Exception:
+        # 审计报告 D2：状态损坏必须可见——静默吞掉会让重试计数/去重全部失效
+        log.exception("scan state 损坏，按空状态继续")
         return set(), {}
 
 
@@ -220,11 +223,19 @@ def _process_message(msg, raw: bytes) -> tuple[str, str]:
                     "请立即用它登录，并马上在客户端『修改用户密码』中"
                     "设置你自己的新密码。\n（本邮件由系统自动发送）")
                 if sent:
-                    forgot.commit_reset(payload)
-                    forgot.audit("RESET_DELIVERED", user=payload["commit"]["user"],
-                                 channel="email", sender=sender,
-                                 detail="temp password emailed and committed")
-                    log.info("two-step reset completed")
+                    # 审计报告 S4：CAS 失败（用户在确认码有效期内自行改密）时
+                    # 记 RESET_RACED——已发出的临时密码作废，用户的新密码有效
+                    if forgot.commit_reset(payload):
+                        forgot.audit("RESET_DELIVERED", user=payload["commit"]["user"],
+                                     channel="email", sender=sender,
+                                     detail="temp password emailed and committed")
+                        log.info("two-step reset completed")
+                    else:
+                        forgot.audit("RESET_RACED", user=payload["commit"]["user"],
+                                     channel="email", sender=sender,
+                                     detail="user changed password during confirmation; "
+                                            "sent temp password is void")
+                        log.warning("two-step reset raced with user password change")
                     return "handled", sender
                 log.warning("temp delivery failed: token retained, will retry")
                 forgot.audit("DELIVER_FAILED", user=payload["commit"]["user"],
@@ -269,11 +280,18 @@ def _process_message(msg, raw: bytes) -> tuple[str, str]:
                 "设置你自己的新密码。如非本人操作，请立即检查邮箱安全。\n"
                 "（本邮件由系统自动发送）")
             if sent:
-                forgot.commit_reset(payload)
-                forgot.audit("RESET_DELIVERED", user=code, channel="email",
-                             sender=sender,
-                             detail="temp password emailed and committed (24h resend)")
-                log.info("24h direct temp delivered and committed")
+                # 审计报告 S4：CAS 结果分别审计
+                if forgot.commit_reset(payload):
+                    forgot.audit("RESET_DELIVERED", user=code, channel="email",
+                                 sender=sender,
+                                 detail="temp password emailed and committed (24h resend)")
+                    log.info("24h direct temp delivered and committed")
+                else:
+                    forgot.audit("RESET_RACED", user=code, channel="email",
+                                 sender=sender,
+                                 detail="user changed password during delivery; "
+                                        "sent temp password is void (24h resend)")
+                    log.warning("24h resend raced with user password change")
             else:
                 log.warning("temp delivery failed: mail left unread for retry")
                 forgot.audit("DELIVER_FAILED", user=code, channel="email",
@@ -355,12 +373,21 @@ def main() -> int:
                 n = retries.get(mid, 0) + 1
                 retries[mid] = n
                 if n >= _RETRY_GIVEUP_ROUNDS:
-                    # 连续 3 轮投递失败：放弃（保持未读、进入去重状态，不再重试）
-                    imap.store(num, "+FLAGS", "\\Seen")
+                    # 审计报告 S2：放弃时保持未读（不标 \Seen），并给管理员发告警；
+                    # 进入去重状态停止重试，管理员修复后让用户重发申请即可。
                     seen_ids.add(mid)
                     retries.pop(mid, None)
+                    try:
+                        _smtp_send(os.environ["PWMGR_ADMIN_EMAIL"],
+                                   "找回邮件无法投递（需人工处理）",
+                                   f"一封找回请求邮件连续 {n} 轮投递失败，已放弃自动处理"
+                                   "（邮件保持未读）。请检查 mail.env 的 SMTP 配置或网络，"
+                                   "修复后让用户重发申请。")
+                    except Exception:
+                        log.warning("管理员告警发送失败（忽略）")
                     forgot.audit("DELIVER_GIVEUP", channel="email", sender=sender,
-                                 detail=f"delivery failed {n} consecutive rounds, giving up")
+                                 detail=f"delivery failed {n} consecutive rounds, "
+                                        f"mail kept unread, admin alerted")
                 _save_state(seen_ids, retries)
                 continue
             if kind == "handled":
