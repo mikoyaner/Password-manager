@@ -125,21 +125,32 @@ public class SettingsActivity extends AppCompatActivity {
         if (!today.equals(oldDay)) v.label = "改密 " + today;   // §5.3：跨天才换 label
         v.pwdTime = now;
         v.touch();
+        // 审计报告 B4 收尾：UI 线程先做序列化+加密快照（含 Argon2 也在后台前的
+        // 锁外完成），后台只写文件与 meta——零共享可变状态
+        final byte[] plain;
+        final int recCount;
+        try {
+            plain = v.toJson();
+            recCount = v.activeRecords().size();
+        } catch (Exception e) {
+            toast("序列化失败: " + e.getMessage());
+            return;
+        }
+        final long fNow = now;
+        final String fLabel = v.label;
         toast("重新加密中…");
         new Thread(() -> {
             try {
                 byte[] salt = Crypto.newSalt();
                 byte[] key = Crypto.deriveKey(newPwd, salt,
                         Crypto.ARGON_M, Crypto.ARGON_T, Crypto.ARGON_P);
-                storage.saveVault(vid, v, key, salt, true); // 未推送前一直标记未同步
+                byte[] blob = Crypto.encryptVault(plain, key, salt);
+                storage.saveVaultSnapshot(vid, blob, fNow, fNow, fLabel, recCount, true);
                 holder.setCredentials(newPwd, key, salt);
-                storage.logSync(vid, "改密码库密码 label=" + v.label + " (未同步)");
+                storage.logSync(vid, "改密码库密码 label=" + fLabel + " (未同步)");
                 runOnUiThread(() -> toast("密码库密码已修改（记得重新推送以更新云端）"));
             } catch (Exception e) {
-                // 落盘失败：把内存里的 label/pwdTime 也回滚，避免界面与实际文件不一致
-                v.pwdTime = oldPwdTime;
-                v.label = oldLabel;
-                v.touch();
+                // 落盘失败：内存与磁盘都不曾改动（快照未被消费），无需回滚
                 runOnUiThread(() -> toast("修改失败: " + e.getMessage()));
             }
         }).start();
