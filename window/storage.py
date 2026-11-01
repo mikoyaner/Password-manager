@@ -359,16 +359,41 @@ class CsvFormatError(Exception):
     """CSV 不符合导入格式。整批导入失败，不写入任何记录。"""
 
 
+def _read_csv_text(path: str) -> str:
+    """读 CSV 全文：优先 utf-8-sig（本应用导出格式），失败回退 gb18030。
+
+    中文 Windows 上记事本/Excel 另存的 CSV 是 ANSI（GBK/GB18030），用户拿
+    这类文件导入是高频场景；只认 UTF-8 会报 codec 错误且难以理解。
+    顺序很重要：UTF-8 先严格尝试，成功才不用 GB18030（后者几乎不报错，
+    会把 UTF-8 内容错解成乱码）。
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise CsvFormatError(f"无法打开文件：{e}") from e
+    for enc in ("utf-8-sig", "gb18030"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise CsvFormatError(
+        "无法识别文件编码（既不是 UTF-8 也不是 GBK/ANSI）。\n"
+        "请用记事本打开该文件，另存为『UTF-8』编码后重试。")
+
+
 def import_csv(path: str) -> list[dict]:
     """解析导出的 CSV → 返回可传入 Vault.add() 的记录列表（严格校验）。
 
     格式要求（不满足则整批抛 CsvFormatError，一条都不导入）：
-    - 表头必须是 UTF-8(-BOM)，且至少包含 'type' 与 'title' 两列。
+    - 编码为 UTF-8(-BOM) 或 GBK/ANSI；表头至少包含 'type' 与 'title' 两列。
     - 每行 type ∈ {login, apikey}；title 非空；apikey 行的 apikey 非空。
     多余列忽略，缺失的可选列按空处理。行号按文件实际行（表头为第 1 行）计。
     """
     try:
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        text = _read_csv_text(path)
+        # newline=""：不转换行符，让 csv 模块自己处理 \r\n（含引号内换行字段）
+        with io.StringIO(text, newline="") as f:
             reader = csv.DictReader(f)
             header = reader.fieldnames
             # 表头按大小写/空白归一化后取值，避免"校验用小写、取值用原样"的错位
@@ -376,7 +401,7 @@ def import_csv(path: str) -> list[dict]:
                 {(k or "").strip().lower(): v for k, v in row.items() if k is not None}
                 for row in reader
             ]
-    except (UnicodeDecodeError, OSError) as e:
+    except OSError as e:
         raise CsvFormatError(f"无法读取文件：{e}") from e
 
     if not header:
