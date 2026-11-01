@@ -530,59 +530,71 @@ class LoginStep2Dialog(QDialog):
 # ============ 同步 ============
 
 class ForgotPwdDialog(QDialog):
-    """忘记密码：输入用户名 → 从服务器取管理员联系方式 → 显示自助重置说明。
+    """忘记密码：打开即显示完整自助重置步骤（不依赖服务器连通、不输用户名）。
 
-    用户用**注册时的邮箱/手机号**发出「01用户名」邮件 / 「01用户名d」短信，
-    服务器验证发件人哈希后自动把用户密码重置为 86868686。
+    已配置服务器地址时后台静默拉 /contact 补充管理员邮箱与短信入口；
+    未配置或网络不通就保持占位文案，不弹错误。步骤文本始终可读。
+    用户用**注册时的邮箱/手机号**发出「01用户名」邮件 / 「01用户名d」短信。
     """
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.setWindowTitle("忘记密码")
-        self.setMinimumWidth(500)
+        self.setWindowTitle("忘记密码 · 自助重置步骤")
+        self.setMinimumWidth(560)
         lay = QVBoxLayout(self)
-        f = QFormLayout()
-        self.user = QLineEdit()
-        f.addRow("用户名", self.user)
-        lay.addLayout(f)
+        self.info = QLabel()
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.TextFormat.MarkdownText)
+        lay.addWidget(self.info)
         btns = QHBoxLayout()
-        fetch = QPushButton("获取发送说明")
-        fetch.clicked.connect(self._fetch)
+        btns.addStretch(1)
         close = QPushButton("关闭")
         close.clicked.connect(self.reject)
-        btns.addWidget(fetch); btns.addStretch(1); btns.addWidget(close)
+        btns.addWidget(close)
         lay.addLayout(btns)
-        self.info = QLabel("输入你的用户名，点『获取发送说明』。")
-        self.info.setWordWrap(True)
-        lay.addWidget(self.info)
 
-    def _fetch(self):
-        u = self.user.text().strip()
-        if not u:
-            self.info.setText("请先输入用户名。")
+        self._admin_email = ""
+        self._sms_hint = ""
+        self._render()
+        # 可选增强：已配置服务器则后台拉联系方式回填（失败静默）
+        if (self.cfg.get("server_url") or "").strip():
+            self._fut = _EXEC.submit(
+                make_client(self.cfg, "contact-check", "x").contact)
+            self._poll = QTimer(self)
+            self._poll.timeout.connect(self._poll_contact)
+            self._poll.start(150)
+
+    def _poll_contact(self):
+        if not self._fut.done():
             return
-        self.info.setText("正在获取服务器联系方式…")
+        self._poll.stop()
         try:
-            # /contact 无需认证，凭据占位即可
-            ct = wait_for(self, lambda: make_client(self.cfg, u, "x").contact(),
-                          "正在获取…")
-        except sync.SyncError as e:
-            self.info.setText(f"获取失败：{e}")
-            return
-        admin_email = (ct or {}).get("admin_email", "")
-        sms_hint = (ct or {}).get("sms_hint", "")
-        email_line = f"到 **{admin_email}**" if admin_email else "——服务器未配置找回邮箱——"
-        sms_line = f"到：**{sms_hint}**" if sms_hint else "——服务器未配置短信入口（短信为人工通道，较慢）——"
+            ct = self._fut.result() or {}
+        except Exception:
+            return   # 未配置/网络不通：保持占位文案
+        self._admin_email = ct.get("admin_email", "") or ""
+        self._sms_hint = ct.get("sms_hint", "") or ""
+        self._render()
+
+    def _render(self):
+        email_line = (f"发到管理员邮箱 **{self._admin_email}**" if self._admin_email
+                      else "发到**管理员邮箱**（部署时配置；不清楚请向管理员索取）")
+        sms_line = (f"发短信「01你的用户名d」到 **{self._sms_hint}**" if self._sms_hint
+                    else "短信通道为人工处理（较慢），推荐使用邮箱")
         self.info.setText(
-            f"用户名：{u}\n\n"
-            f"1. 用**注册时的邮箱**发送内容「01{u}」{email_line}\n"
-            f"2. 系统自动回复一封**确认码**邮件（15 分钟内有效）\n"
-            f"3. **复制确认码，新建一封空白邮件**（收件人同上）粘贴确认码后发送"
-            f"——不要直接回复原邮件\n"
-            f"4. 系统再把**随机临时密码**发到你的邮箱，用它登录并立即修改密码\n\n"
-            f"短信通道（{sms_line}）为人工处理，速度较慢，推荐使用邮箱。\n"
-            "全程只需能收发你的注册邮箱；服务器不存任何明文联系方式。")
+            "### 操作步骤（邮箱，推荐）\n"
+            "1. 用**注册时的邮箱**给管理员邮箱发一封邮件，正文只写：`01你的用户名`\n"
+            f"   （{email_line}）\n"
+            "2. 约 1 分钟内收到系统自动回复的 **8 位确认码**（15 分钟内有效）\n"
+            "3. **新建一封空白邮件**（不要直接回复原邮件），收件人同上，"
+            "正文粘贴确认码后发送\n"
+            "4. 收到系统发来的**随机临时密码**，用它登录并立即修改用户密码\n\n"
+            "### 24 小时内再次申请\n"
+            "24 小时内已重置过且未改密时，再次发「01你的用户名」**跳过确认码**，"
+            "直接收到新的临时密码。\n\n"
+            "### 短信通道（可选）\n"
+            f"{sms_line}。服务器不存任何明文联系方式，验证基于发件人邮箱哈希。")
 
 
 class SyncDialog(QDialog):
