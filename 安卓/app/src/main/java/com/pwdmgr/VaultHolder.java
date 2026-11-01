@@ -143,7 +143,10 @@ public class VaultHolder {
         public final byte[] salt;
 
         Snapshot(String vid, Vault v, byte[] k, byte[] s) {
-            vid = vid; vault = v; key = k; salt = s;
+            this.vid = vid;
+            this.vault = v;
+            this.key = k;
+            this.salt = s;
         }
     }
 
