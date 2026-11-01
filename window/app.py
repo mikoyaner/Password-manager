@@ -1704,10 +1704,18 @@ class MainWindow(QMainWindow):
             self.vault.add(type=r["type"], title=r["title"], url=r["url"],
                            username=r["username"], password=r["password"],
                            apikey=r["apikey"], note=r["note"])
+        # 导入完成后自动去重：业务字段完全相同的记录只留一条（含 CSV 内部重复
+        # 与 CSV 与库内已有记录撞车两种情况），避免一次导入翻倍出重复项
+        removed = self.vault.dedupe()
         self._save_local(); self._refresh_list()
-        self._set_status(f"已导入 {len(records)} 条 · 未同步")
+        status = f"已导入 {len(records)} 条"
+        msg = f"已导入 {len(records)} 条记录"
+        if removed:
+            status += f" · 去重 {removed}"
+            msg += f"，自动去重 {removed} 条完全重复项"
+        self._set_status(status + " · 未同步")
         QMessageBox.information(self, "导入成功",
-                                 f"已导入 {len(records)} 条记录。请记得点『同步』推送。")
+                                 f"{msg}。请记得点『同步』推送。")
 
     def _export_csv(self):
         n = len(self.vault.active_records())

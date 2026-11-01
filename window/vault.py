@@ -131,6 +131,30 @@ class Vault:
         rec["updated_at"] = now_ts()
         self.touch()
 
+    def dedupe(self) -> int:
+        """业务字段完全相同的活跃记录只保留最先出现的一条，返回删除条数。
+
+        比较字段：type/title/url/username/password/apikey/note——时间戳与
+        记录编号不参与（同一内容的两条导入时间戳必然不同）。已软删除的
+        记录不参与比较也不清理。纯内存哈希去重，O(n)，万条毫秒级。
+        """
+        _FIELDS = ("type", "title", "url", "username", "password", "apikey", "note")
+        seen: set = set()
+        removed = 0
+        for rid in list(self.records):          # dict 保序：保留最先出现的一条
+            rec = self.records[rid]
+            if rec.get("deleted"):
+                continue
+            key = tuple(rec.get(f) or "" for f in _FIELDS)
+            if key in seen:
+                del self.records[rid]
+                removed += 1
+            else:
+                seen.add(key)
+        if removed:
+            self.touch()
+        return removed
+
     def touch(self) -> None:
         """修改本地 modified_at。真值以服务器为准；本地用于 dirty 判断与展示。"""
         self.modified_at = now_ts()
